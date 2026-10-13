@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS people (
   notify_email  TEXT,         -- a verified address other than `email`; NULL = `email` (from SSO)
   notify_prefs  TEXT,         -- JSON {"discord": [event], "email": [event]}; NULL = all off
   -- 1 = temp_password was set for an account-creation job that has not succeeded yet: not shown to its owner
-  temp_password_pending INTEGER NOT NULL DEFAULT 0
+  temp_password_pending INTEGER NOT NULL DEFAULT 0,
+  -- 移除成員 (offboarding): when an admin removed this person (status 'locked', SSO and notification links cleared).
+  -- The row stays for history; NULL = not removed. Setting the status back to active clears it.
+  removed_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS accounts (

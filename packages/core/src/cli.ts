@@ -32,7 +32,7 @@ async function main(args: string[]): Promise<number> {
     const con = new DB(config.dbPath)
     con.tx(() => {
       const row = con.get<{ id: number }>('SELECT id FROM people WHERE username=?', username)
-      if (row) con.run("UPDATE people SET sso_id=?, role='admin', status='active' WHERE id=?", ssoId, row.id)
+      if (row) con.run("UPDATE people SET sso_id=?, role='admin', status='active', removed_at=NULL WHERE id=?", ssoId, row.id)
       else {
         con.run("INSERT INTO people(username, sso_id, role, status, created_at) VALUES (?,?,'admin','active',?)", username, ssoId, now())
       }

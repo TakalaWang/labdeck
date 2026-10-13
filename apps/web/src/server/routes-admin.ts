@@ -1,10 +1,10 @@
 import {
   Conflict, type DB, PromError, type Row, SSO_ID_RE, STALE_USERS_JOB, ValueErr, adopt, allocator, assignHosts, audit,
-  checkNewUsername, cmp, config, cut, enqueueUsers, filesystems, gpuBoard, grant, inventory, iso, isPrintable, notifications as nt, notify,
-  now, parseDate, pyJson, pyRound, rerunJob, usersJobStale, validUsername,
+  checkNewUsername, cmp, config, cut, deleteAccount, enqueueUsers, filesystems, gpuBoard, grant, inventory, iso, isPrintable, lockAccount,
+  notifications as nt, notify, now, parseDate, pyJson, pyRound, rerunJob, usersJobStale, validUsername,
 } from '@labdeck/core'
 import { admin, isMember, route } from './app.ts'
-import { HttpError, clampBig, model, opt, pathInt, queryInt, queryStr, sqlInt } from './http.ts'
+import { HttpError, clampBig, model, opt, optNotNull, pathInt, queryInt, queryStr, sqlInt } from './http.ts'
 import {
   ACCOUNT_SQL, ADMIN_ACCOUNT, accountJson, accountsAndKeys, hostJson, jobJson, knownHosts, monitored, primaryUsers, requestJson,
   userJson,
@@ -95,6 +95,24 @@ route('POST', '/api/admin/requests/{rid}/reject', (ctx) => {
     nt.requestRejected(con, r, reason)
   })
   return requestJson(con, con.get('SELECT * FROM requests WHERE id=?', rid)!)
+})
+
+/**
+ * 移除: delete a pending registration or host request without telling anyone (duplicates, mistakes, strangers).
+ * Unlike 退回 nothing is shown to or sent to the requester; the identity may register again.
+ */
+route('DELETE', '/api/admin/requests/{rid}', (ctx) => {
+  const me = admin(ctx)
+  const { con } = ctx
+  const rid = pathInt(ctx.params.rid)
+  con.tx(() => {
+    const r = pendingRequest(con, rid)
+    con.run("DELETE FROM requests WHERE id=? AND status='pending'", r.id)
+    audit(con, me.username, 'request_delete', r.username, {
+      request: r.id, kind: r.kind, sso_id: r.sso_id, ...(r.name ? { name: r.name } : {}), ...(r.person_id ? { person_id: r.person_id } : {}),
+    })
+  })
+  return {}
 })
 
 /** Hosts for the assignment picker: hardware from the last collect, live GPU / disk numbers from Prometheus. */
@@ -307,7 +325,9 @@ route('POST', '/api/admin/accounts/adopt-bulk', (ctx) => {
 const PERSON_SQL = `SELECT p.*, (SELECT COUNT(*) FROM accounts a WHERE a.person_id = p.id AND a.managed = 1
                                 AND a.desired = 'present') AS hosts_count FROM people p`
 
-const personJson = (p: Row) => ({ ...userJson(p), uid: p.uid, created_at: iso(p.created_at), hosts_count: p.hosts_count })
+const personJson = (p: Row) => ({
+  ...userJson(p), uid: p.uid, created_at: iso(p.created_at), hosts_count: p.hosts_count, removed_at: iso(p.removed_at ?? null),
+})
 
 function getPerson(con: DB, pid: number | bigint): Row {
   const p = con.get(`${PERSON_SQL} WHERE p.id=?`, pid)
@@ -366,8 +386,10 @@ route('PUT', '/api/admin/people/{pid}', (ctx) => {
   }
   try {
     con.tx(() => {
-      con.run('UPDATE people SET name=?, email=?, sso_id=?, expires_at=?, status=? WHERE id=?',
-        ...(Object.values(fresh) as (string | null)[]), pid)
+      // a removed person set back to active is no longer removed (links stay cleared until edited here)
+      con.run(`UPDATE people SET name=?, email=?, sso_id=?, expires_at=?, status=?,
+               removed_at=CASE WHEN ?='active' THEN NULL ELSE removed_at END WHERE id=?`,
+        ...(Object.values(fresh) as (string | null)[]), b.status, pid)
       if (b.status === 'locked') con.run("UPDATE accounts SET desired='locked' WHERE person_id=? AND managed=1", pid)
       audit(con, me.username, 'person_update', p.username, Object.fromEntries(Object.entries(fresh).filter(([k, v]) => v !== p[k])))
     })
@@ -401,6 +423,75 @@ route('POST', '/api/admin/people/{pid}/promote', async (ctx) => {
     await notify(`[管理員] ${me.username} 將 ${promoted.username}${promoted.name ? `（${promoted.name}）` : ' '}設為管理員`)
   }
   return personJson(getPerson(con, pid))
+})
+
+/** The person's host accounts 移除成員 decides on: managed ones, except those already deleted. */
+const REMOVABLE_SQL = `SELECT * FROM accounts WHERE person_id=? AND managed=1 AND NOT (desired='absent' AND exists_on_host=0)
+                       ORDER BY host`
+
+type HostChoice = { host: string; action: string; remove_home: boolean; confirm: string }
+
+/**
+ * 移除成員 (offboarding): one choice per host account — lock (default) or delete, with or without the home
+ * directory — each a previewed job for that one account (never auto). The person is locked and marked removed, their
+ * SSO identity and notification links are cleared (no member login any more), pending requests are closed; the row
+ * stays (history). Not oneself, never the last active admin.
+ */
+route('POST', '/api/admin/people/{pid}/remove', async (ctx) => {
+  const me = admin(ctx)
+  const { con } = ctx
+  const { data } = model<{ hosts: HostChoice[] }>(ctx.body(), {
+    hosts: { list: { host: 'str', action: 'str', remove_home: optNotNull('bool', false), confirm: optNotNull('str', '') } },
+  })
+  const pid = getPerson(con, pathInt(ctx.params.pid)).id as number
+  const out = con.tx(() => {
+    const p = getPerson(con, pid) // re-read inside the write transaction
+    if (p.removed_at) throw new Conflict(`${p.username} 已經移除`)
+    // the same rule as labdeck demote-admin; the acting admin is always active, so it bites when one removes oneself
+    if (p.role === 'admin' && p.status === 'active' &&
+        !con.value<number>("SELECT COUNT(*) FROM people WHERE role='admin' AND status='active' AND id != ?", pid)) {
+      throw new ValueErr('不能移除最後一位啟用中的管理員')
+    }
+    if (pid === me.id) throw new ValueErr('不能移除自己')
+    const accounts = con.all(REMOVABLE_SQL, pid)
+    const byHost = new Map(data.hosts.map((c) => [c.host, c]))
+    if (byHost.size !== data.hosts.length) throw new ValueErr('每台主機只能選一次')
+    const stray = data.hosts.filter((c) => !accounts.some((a) => a.host === c.host)).map((c) => c.host)
+    if (stray.length) throw new ValueErr(`${p.username} 在這些主機沒有帳號：${stray.join('、')}`)
+    const missing = accounts.filter((a) => !byHost.has(a.host)).map((a) => a.host)
+    if (missing.length) throw new ValueErr(`請為每台主機選擇鎖定或刪除：${missing.join('、')}`)
+    const jobs: { host: string; action: string; remove_home: boolean; job_id: number }[] = []
+    for (const a of accounts) {
+      const c = byHost.get(a.host)!
+      if (c.action !== 'lock' && c.action !== 'delete') throw new ValueErr(`${a.host}：請選擇鎖定或刪除`)
+      const home = c.action === 'delete' && c.remove_home
+      if (c.action === 'lock' && c.remove_home) throw new ValueErr(`${a.host}：鎖定不會刪除家目錄`)
+      if (home && c.confirm.trim() !== a.username) throw new ValueErr(`${a.host}：確認文字不符，刪除家目錄請輸入 ${a.username}`)
+      try {
+        const job = c.action === 'lock' ? lockAccount(con, me.username, a.host, a.username) : deleteAccount(con, me.username, a.host, a.username, home)
+        jobs.push({ host: a.host, action: c.action, remove_home: home, job_id: job })
+      } catch (e) {
+        if (e instanceof ValueErr) e.message = `${a.host}：${e.message}`
+        throw e
+      }
+    }
+    con.run(`UPDATE people SET status='locked', removed_at=?, sso_id=NULL, discord_id=NULL, discord_name=NULL, notify_email=NULL,
+             notify_prefs=NULL, temp_password=NULL, temp_password_pending=0 WHERE id=?`, now(), pid)
+    con.run('DELETE FROM email_verifications WHERE person_id=?', pid)
+    con.run("UPDATE outbox SET status='skipped', error='人員已移除' WHERE person_id=? AND status='queued'", pid)
+    const closed = con.run(`UPDATE requests SET status='rejected', decided_by=?, decided_at=?, decision_note='人員已移除'
+                            WHERE status='pending' AND (person_id=? OR sso_id=?)`, me.username, now(), pid, p.sso_id ?? '').changes
+    audit(con, me.username, 'person_remove', p.username, {
+      sso_id: p.sso_id ?? null, closed_requests: closed,
+      hosts: Object.fromEntries(jobs.map((j) => [j.host, j.action === 'lock' ? 'lock' : j.remove_home ? 'delete_home' : 'delete'])),
+      jobs: jobs.map((j) => j.job_id),
+    })
+    return { p, jobs }
+  })
+  const what = out.jobs.map((j) => `${j.host} ${j.action === 'lock' ? '鎖定' : j.remove_home ? '刪除（含家目錄）' : '刪除'}`)
+  await notify(`[移除成員] ${me.username} 移除了 ${out.p.username}${out.p.name ? `（${out.p.name}）` : ''}` +
+    (what.length ? `：${what.join('、')}；${what.length} 個預覽工作待確認` : '：沒有主機帳號'))
+  return { person: personJson(getPerson(con, pid)), jobs: out.jobs.map(({ host, action, job_id }) => ({ host, action, job_id })) }
 })
 
 /**

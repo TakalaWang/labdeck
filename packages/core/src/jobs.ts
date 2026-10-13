@@ -7,7 +7,7 @@ const some = (xs: string[], unit: string, max = 3) => (xs.length > max ? `${xs.s
 
 type Entry = { username?: unknown; state?: unknown; remove_home?: unknown }
 
-/** e.g. 「指派 xiaoming @gpu01」「刪除 oldgrad @gpu01」「金鑰部署 alice @gpu01、gpu02」「收集資料（全部主機）」. */
+/** e.g. 「指派 xiaoming @gpu01」「刪除 oldgrad @gpu01」「鎖定 oldgrad @gpu01」「金鑰部署 alice @gpu01、gpu02」「收集資料（全部主機）」. */
 export function describeJob(kind: string, args: Record<string, unknown> | null | undefined, autoConfirm = false): string {
   const th = String(args?.target_hosts ?? '')
   const hosts = th === 'all' ? [] : th.split(',').filter(Boolean)
@@ -22,6 +22,7 @@ export function describeJob(kind: string, args: Record<string, unknown> | null |
   if (entries.length && entries.every((e) => e.state === 'absent')) {
     return `刪除 ${who}${entries.some((e) => e.remove_home) ? '（含家目錄）' : ''}${at}`
   }
+  if (entries.length && entries.every((e) => e.state === 'locked')) return `鎖定 ${who}${at}`
   return `${autoConfirm ? '金鑰部署' : '帳號同步'} ${who}${at}`
 }
 

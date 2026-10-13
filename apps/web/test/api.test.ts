@@ -359,7 +359,7 @@ test('every endpoint and the main flows', async () => {
   expect(val(con, 'SELECT COUNT(*) FROM jobs')).toBe(jobsBefore)
   const detail = ok(await get(`/api/admin/people/${mem}`))
   expect(keys(detail)).toEqual(['accounts', 'hosts', 'keys', 'person'])
-  expect(keys(detail.person)).toEqual(sorted([...USER_KEYS, 'uid', 'created_at', 'hosts_count']))
+  expect(keys(detail.person)).toEqual(sorted([...USER_KEYS, 'uid', 'created_at', 'hosts_count', 'removed_at']))
   expect(detail.person.hosts_count).toBe(2)
   expect(detail.hosts).toEqual([{ name: 'gpu01', group: 'gpu', granted: true, exists: true },
     { name: 'gpu02', group: 'gpu', granted: false, exists: true }, { name: 'gpu03', group: 'legacy', granted: true, exists: true }])

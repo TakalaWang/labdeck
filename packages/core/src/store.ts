@@ -201,6 +201,26 @@ export function deleteAccount(con: DB, actor: string, host: string, username: st
     removeHome ? 1 : 0, uid, host, username,
   )
   audit(con, actor, 'account_delete', `${host}/${username}`, { remove_home: removeHome, person_id: a.person_id ?? null })
+  return enqueueOneAccount(con, actor, host, username)
+}
+
+/**
+ * Lock one person's account on one host (desired locked, nothing deleted) and queue a users job for just that
+ * account. Never auto-confirmed: an admin confirms its preview. Restored by 停用／恢復主機帳號 or an assignment.
+ */
+export function lockAccount(con: DB, actor: string, host: string, username: string): number {
+  if (!validUsername(username)) throw new ValueErr('保留帳號或名稱不合法的帳號不能鎖定')
+  const a = con.get('SELECT * FROM accounts WHERE host=? AND username=?', host, username)
+  if (!a) throw new ValueErr('主機上沒有這個帳號')
+  if (!a.managed || !a.person_id) throw new ValueErr('沒有人認領的帳號不能鎖定：請先認領，或改用刪除')
+  if (a.desired === 'absent' && !a.exists_on_host) throw new ValueErr('這個帳號已刪除')
+  con.run("UPDATE accounts SET desired='locked', remove_home=0 WHERE host=? AND username=?", host, username)
+  audit(con, actor, 'account_lock', `${host}/${username}`, { person_id: a.person_id })
+  return enqueueOneAccount(con, actor, host, username)
+}
+
+/** A previewed users job for exactly one (host, username), as the DB has it now. */
+function enqueueOneAccount(con: DB, actor: string, host: string, username: string): number {
   const payload = usersPayload(con.all(`${USERS_SQL} AND a.host = ? AND a.username = ?`, host, username), personKeys(con))
   return enqueue(con, actor, 'users', payload)
 }

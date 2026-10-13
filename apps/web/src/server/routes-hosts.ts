@@ -1,5 +1,5 @@
 import {
-  Conflict, PromError, ValueErr, addHosts, audit, checkHostNames, config, deleteAccount, enqueue, gpuBoard, now, parseHostsCsv,
+  Conflict, PromError, ValueErr, addHosts, audit, checkHostNames, config, deleteAccount, enqueue, gpuBoard, lockAccount, now, parseHostsCsv,
   pyFloatStr, sortBy, validateHost,
 } from '@labdeck/core'
 import { type Ctx, admin, member, route } from './app.ts'
@@ -191,6 +191,13 @@ route('POST', '/api/admin/hosts/{name}/accounts/{username}/delete', (ctx) => {
   const { username } = ctx.params
   if (data.remove_home && data.confirm.trim() !== username) throw new ValueErr(`確認文字不符：刪除家目錄請輸入 ${username}`)
   return { job_id: ctx.con.tx(() => deleteAccount(ctx.con, me.username, host, username, data.remove_home)) }
+})
+
+/** Lock one person's account on this host (nothing deleted): a previewed users job, never auto. */
+route('POST', '/api/admin/hosts/{name}/accounts/{username}/lock', (ctx) => {
+  const me = admin(ctx)
+  const host = storedHost(ctx.con, ctx.params.name).name as string
+  return { job_id: ctx.con.tx(() => lockAccount(ctx.con, me.username, host, ctx.params.username)) }
 })
 
 /** The complete set of primary users over every host: the listed managed accounts are set, all others cleared. */
