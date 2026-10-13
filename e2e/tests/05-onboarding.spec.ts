@@ -102,7 +102,8 @@ test('an old unassigned account is deleted with its home: previewed, then applie
   await login(page, 'tester');
   expect(gpu01('getent', 'passwd', 'bob')).toMatch(/^bob:x:1002:/);
   await page.goto('/hosts/gpu01#accounts'); // a link from before the host tabs: opens 使用者
-  await page.locator('#accounts').getByRole('button', { name: '刪除 bob' }).click();
+  await page.locator('#accounts').getByRole('button', { name: '移除 bob' }).click();
+  await page.getByRole('menuitem', { name: /^刪除/ }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByText('同時刪除家目錄').click();
   const confirm = dialog.getByRole('button', { name: '刪除帳號與家目錄' });
