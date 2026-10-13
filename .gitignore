@@ -1,0 +1,13 @@
+.env
+secrets/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.retry
+.DS_Store
+node_modules/
+e2e/.work/
+e2e/test-results/
+e2e/playwright-report/
+compose.override.yaml
+crates/agent/target/

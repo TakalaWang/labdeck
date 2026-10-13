@@ -1,0 +1,14 @@
+lab_gpu_info{gpu="0",uuid="GPU-aaaa",name="NVIDIA GeForce RTX 3090"} 1
+lab_gpu_info{gpu="1",uuid="GPU-bbbb",name="NVIDIA \"Quoted\" \\Name"} 1
+lab_gpu_memory_total_bytes{gpu="0",uuid="GPU-aaaa"} 25769803776
+lab_gpu_memory_total_bytes{gpu="1",uuid="GPU-bbbb"} 25769803776
+lab_gpu_memory_used_bytes{gpu="0",uuid="GPU-aaaa"} 21100494848
+lab_gpu_pci_count 3
+lab_gpu_power_watts{gpu="0",uuid="GPU-aaaa"} 301.52
+lab_gpu_process_memory_bytes{gpu="",uuid="GPU-zzzz",user="bob",pid="4244",comm="x"} 1048576
+lab_gpu_process_memory_bytes{gpu="0",uuid="GPU-aaaa",user="alice",pid="4242",comm="python train.py"} 20971520000
+lab_gpu_process_memory_bytes{gpu="1",uuid="GPU-bbbb",user="ev\"il",pid="4243",comm="my comm"} 536870912
+lab_gpu_smi_count 3
+lab_gpu_temperature_celsius{gpu="0",uuid="GPU-aaaa"} 71
+lab_gpu_utilization_percent{gpu="0",uuid="GPU-aaaa"} 87
+lab_nvidia_smi_ok 1

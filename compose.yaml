@@ -1,0 +1,133 @@
+name: labdeck
+
+# Images: prebuilt from GHCR by default (docker compose pull && docker compose up -d; docs/deploy.md).
+# LABDECK_IMAGE_PREFIX / LABDECK_VERSION in .env pick them; building from a checkout (docker compose build)
+# tags its images with the same names, so set LABDECK_IMAGE_PREFIX=labdeck LABDECK_VERSION=local there.
+
+x-app: &app
+  env_file: .env
+  environment: &env
+    TZ: ${TZ:-UTC}
+  restart: unless-stopped
+  networks: [lab]
+
+# runner 與 cli 跑 ansible：持有 SSH key 與 vault（docs/design.md 約定 A）
+x-ansible: &ansible
+  <<: *app
+  build:
+    context: .
+    dockerfile: apps/runner/Dockerfile
+    additional_contexts:
+      agent: ./crates/agent # labdeck-agent, built in the image (apps/runner/Dockerfile)
+  image: ${LABDECK_IMAGE_PREFIX:-ghcr.io/takalawang/labdeck}-runner:${LABDECK_VERSION:-latest}
+  environment:
+    <<: *env
+    BOT_USER: ${BOT_USER:-labbot}
+    KNOWN_HOSTS: /data/known_hosts
+    PROM_SD_DIR: /prom_sd # runner writes Prometheus file_sd here (not nested under /data)
+    ANSIBLE_CONFIG: /repo/ansible/ansible.cfg # the playbooks are in the image (apps/runner/Dockerfile)
+    ANSIBLE_INVENTORY: /usr/local/bin/labdeck-inventory # dynamic inventory from the hosts table (約定 C)
+    ANSIBLE_VAULT_PASSWORD_FILE: /run/secrets/vault_pass
+    ANSIBLE_SSH_ARGS: -o UserKnownHostsFile=/data/known_hosts -o StrictHostKeyChecking=yes -o ControlMaster=auto -o ControlPersist=30m -o ServerAliveInterval=30
+
+services:
+  # 唯一對外：TLS 與安全標頭，全部轉給 web
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/caddy.Dockerfile
+    image: ${LABDECK_IMAGE_PREFIX:-ghcr.io/takalawang/labdeck}-caddy:${LABDECK_VERSION:-latest}
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+      CADDY_TLS: ${CADDY_TLS:-local}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy-tls:/etc/caddy/tls:ro
+      # 自備憑證：- ./certs:/certs:ro（見 deploy/Caddyfile）
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web]
+    networks: [lab]
+
+  # Next.js：網頁與 JSON API（不掛 repo、不持有 SSH key 或 vault）
+  web:
+    <<: *app
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: ${LABDECK_IMAGE_PREFIX:-ghcr.io/takalawang/labdeck}-web:${LABDECK_VERSION:-latest}
+    environment:
+      <<: *env
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+    volumes: ["portal_data:/data"]
+
+  runner:
+    <<: *ansible
+    volumes:
+      - portal_data:/data
+      - prom_sd:/prom_sd
+      - ./secrets:/run/secrets:ro
+
+  # 網管手動跑 playbook：docker compose run --rm cli ansible-playbook playbooks/…（working_dir 是 ansible/）
+  cli:
+    <<: *ansible
+    profiles: [cli]
+    restart: "no"
+    stdin_open: true
+    tty: true
+    working_dir: /repo/ansible
+    command: [bash]
+    volumes:
+      - portal_data:/data
+      - ./secrets:/run/secrets:ro
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/config/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=400d
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus/config:ro
+      # 目錄掛載：targets.json 由 runner 以 rename 原子更新，單檔 bind mount 會卡在舊 inode
+      - prom_sd:/etc/prometheus/sd:ro
+      - ./secrets/node_exporter.crt:/etc/node_exporter/tls.crt:ro
+      - ./secrets/node_exporter_password:/run/secrets/node_exporter_password:ro
+      - prometheus_data:/prometheus
+    networks: [lab]
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    restart: unless-stopped
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets/discord_webhook:/etc/alertmanager/discord_webhook:ro
+      - alertmanager_data:/alertmanager
+    networks: [lab]
+
+  # Cloudflare Tunnel（docs/deploy.md）：主機不開任何連入 port，公開主機名稱在 Cloudflare 指向 http://caddy:80
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.3
+    profiles: [tunnel]
+    restart: unless-stopped
+    command: [tunnel, --no-autoupdate, run]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on: [caddy]
+    networks: [lab]
+
+networks:
+  lab:
+    # Docker 自動選網段；與校內既有網段衝突時指定：ipam: {config: [{subnet: 172.30.0.0/24}]}
+
+volumes:
+  caddy_data:
+  caddy_config:
+  portal_data:
+  prom_sd:
+  prometheus_data:
+  alertmanager_data:

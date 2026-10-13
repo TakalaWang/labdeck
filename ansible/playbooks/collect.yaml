@@ -1,0 +1,56 @@
+---
+# Read-only inventory of hosts for the portal: writes {{ collect_dir }}/<host>.json on the controller.
+# The only change on a host is installing/updating labdeck-agent (same path as monitoring_agents.yaml), so this
+# also works on hosts without monitoring agents.
+# vars: collect_dir (required), target_hosts (default all), data_mount_glob (default /data*).
+- name: Collect host information
+  hosts: "{{ target_hosts | default('all') }}"
+  become: true
+  gather_facts: false
+  vars:
+    agent_src: "{{ labdeck_agent_src | default('/opt/labdeck/bin/labdeck-agent') }}"
+    agent_bin: /usr/local/lib/labdeck/labdeck-agent
+  tasks:
+    - name: Validate arguments
+      ansible.builtin.assert:
+        that:
+          - collect_dir is defined
+          - collect_dir | length > 0
+
+    - name: Create collect directory
+      ansible.builtin.file:
+        path: "{{ collect_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Create labdeck-agent directory
+      ansible.builtin.file:
+        path: "{{ agent_bin | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install labdeck-agent
+      ansible.builtin.copy:
+        src: "{{ agent_src }}"
+        dest: "{{ agent_bin }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Run collector
+      ansible.builtin.command:
+        argv: ["{{ agent_bin }}", facts, "{{ inventory_hostname }}", "{{ data_mount_glob | default('/data*') }}"]
+      register: collected
+      changed_when: false
+      timeout: 600 # e.g. a hung network mount; one stuck host must not hold the runner
+
+    - name: Save collected JSON
+      ansible.builtin.copy:
+        content: "{{ collected.stdout }}"
+        dest: "{{ collect_dir }}/{{ inventory_hostname }}.json"
+        mode: "0644"
+      delegate_to: localhost
+      become: false

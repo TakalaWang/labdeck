@@ -1,0 +1,3 @@
+# Same version as the agent build stage in apps/runner/Dockerfile and the CI job.
+[toolchain]
+channel = "1.91.0"

@@ -1,0 +1,5 @@
+lab_du_success_timestamp_seconds{root="BASE/home"} 1790000000
+lab_user_disk_bytes{root="BASE/home",path="BASE/home/alice",owner="alice"} 20480
+lab_user_disk_bytes{root="BASE/home",path="BASE/home/bob",owner=""} 12288
+lab_user_disk_bytes{root="BASE/home",path="BASE/home/new\nline",owner="alice"} 32768
+lab_user_disk_bytes{root="BASE/home",path="BASE/home/we\"ird\\name",owner="alice"} 45056

@@ -1,0 +1,266 @@
+---
+# Installs node_exporter (TLS + basic auth) and the lab textfile collectors (labdeck-agent). Run by the runner as the
+# `agents` job (docs/design.md 約定 F), which passes the vault vars (-e @/run/secrets/vault.yml) and adds
+# the hosts to Prometheus afterwards. Needs /run/secrets/node_exporter.crt (see vault.yml.example).
+- name: Install monitoring agents
+  hosts: "{{ target_hosts | default('all') }}"
+  become: true
+  vars:
+    # ponytail: linux-amd64 only; arm64 hosts need a second tarball + checksum.
+    node_exporter_version: 1.12.1
+    node_exporter_sha256: b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63
+    node_exporter_name: node_exporter-{{ node_exporter_version }}.linux-amd64
+    textfile_dir: /var/lib/node_exporter/textfile
+    # labdeck-agent (crates/agent), built into the runner image; copied only when its checksum changes.
+    agent_src: "{{ labdeck_agent_src | default('/opt/labdeck/bin/labdeck-agent') }}"
+    agent_bin: /usr/local/lib/labdeck/labdeck-agent
+    units:
+      node_exporter.service: |
+        [Unit]
+        Description=Prometheus node_exporter
+        After=network-online.target
+
+        [Service]
+        User=node_exporter
+        ExecStart=/opt/{{ node_exporter_name }}/node_exporter --collector.textfile.directory={{ textfile_dir }} --web.config.file=/etc/node_exporter/web-config.yml --web.listen-address=:{{ node_exporter_port | default(9100) }}
+        Restart=always
+
+        [Install]
+        WantedBy=multi-user.target
+      lab-gpu.service: |
+        [Unit]
+        Description=Lab GPU metrics for node_exporter
+
+        [Service]
+        ExecStart={{ agent_bin }} textfile gpu --dir {{ textfile_dir }}
+        Restart=always
+        RestartSec=15
+
+        [Install]
+        WantedBy=multi-user.target
+      lab-procs.service: |
+        [Unit]
+        Description=Lab per-user CPU and memory metrics for node_exporter
+
+        [Service]
+        ExecStart={{ agent_bin }} textfile procs --dir {{ textfile_dir }}
+        Restart=always
+        RestartSec=15
+
+        [Install]
+        WantedBy=multi-user.target
+      # ponytail: IOSchedulingClass=idle only has an effect under the BFQ I/O scheduler (mq-deadline and none
+      # ignore it; NVMe defaults to none), so du relies on Nice=19 there. Fine for a weekly/nightly scan.
+      lab-du-home.service: |
+        [Unit]
+        Description=Lab /home disk usage for node_exporter
+
+        [Service]
+        Type=oneshot
+        Nice=19
+        IOSchedulingClass=idle
+        TimeoutStartSec=6h
+        ExecStart={{ agent_bin }} textfile du /home du_home.prom --dir {{ textfile_dir }}
+      lab-du-home.timer: |
+        [Timer]
+        OnCalendar=*-*-* 02:00
+        RandomizedDelaySec=1h
+
+        [Install]
+        WantedBy=timers.target
+      lab-du-data.service: |
+        [Unit]
+        Description=Lab data mount disk usage for node_exporter
+
+        [Service]
+        Type=oneshot
+        Nice=19
+        IOSchedulingClass=idle
+        TimeoutStartSec=6h
+        ExecStart={{ agent_bin }} textfile du {{ data_mount_glob | default('/data*') }} du_data.prom --dir {{ textfile_dir }}
+      lab-du-data.timer: |
+        [Timer]
+        OnCalendar=Sun *-*-* 02:00
+        RandomizedDelaySec=1h
+
+        [Install]
+        WantedBy=timers.target
+      lab-smartmon.service: |
+        [Unit]
+        Description=Lab SMART metrics for node_exporter
+
+        [Service]
+        Type=oneshot
+        ExecStart={{ agent_bin }} textfile smart --dir {{ textfile_dir }}
+      lab-smartmon.timer: |
+        [Timer]
+        OnCalendar=hourly
+
+        [Install]
+        WantedBy=timers.target
+    running_units: [node_exporter.service, lab-gpu.service, lab-procs.service, lab-du-home.timer, lab-du-data.timer, lab-smartmon.timer]
+  tasks:
+    - name: Check that the node_exporter certificate exists
+      ansible.builtin.assert:
+        that: "'/run/secrets/node_exporter.crt' is file"
+        fail_msg: /run/secrets/node_exporter.crt is missing; create secrets/node_exporter.crt with the openssl command in vault.yml.example
+      run_once: true
+
+    - name: Create node_exporter user
+      ansible.builtin.user:
+        name: node_exporter
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Download node_exporter
+      ansible.builtin.get_url:
+        url: https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/{{ node_exporter_name }}.tar.gz
+        dest: /opt/{{ node_exporter_name }}.tar.gz
+        checksum: sha256:{{ node_exporter_sha256 }}
+        mode: "0644"
+
+    - name: Unpack node_exporter
+      ansible.builtin.unarchive:
+        src: /opt/{{ node_exporter_name }}.tar.gz
+        dest: /opt
+        remote_src: true
+        creates: /opt/{{ node_exporter_name }}/node_exporter
+        extra_opts: [--no-same-owner] # not the tarball's uid/gid, which may belong to a lab user here
+      notify: Restart lab units
+
+    - name: Make the node_exporter install root-owned
+      ansible.builtin.file:
+        path: /opt/{{ node_exporter_name }}
+        owner: root
+        group: root
+        recurse: true
+
+    - name: Create node_exporter config directory
+      ansible.builtin.file:
+        path: /etc/node_exporter
+        state: directory
+        owner: root
+        group: node_exporter
+        mode: "0750"
+
+    - name: Install node_exporter certificate
+      ansible.builtin.copy:
+        src: /run/secrets/node_exporter.crt
+        dest: /etc/node_exporter/tls.crt
+        mode: "0644"
+
+    - name: Install node_exporter private key
+      ansible.builtin.copy:
+        content: "{{ vault_node_exporter_tls_key }}"
+        dest: /etc/node_exporter/tls.key
+        owner: root
+        group: node_exporter
+        mode: "0640"
+      no_log: true
+
+    - name: Write node_exporter web config
+      ansible.builtin.copy:
+        content: |
+          tls_server_config:
+            cert_file: /etc/node_exporter/tls.crt
+            key_file: /etc/node_exporter/tls.key
+          basic_auth_users:
+            prometheus: "{{ vault_node_exporter_basic_auth_bcrypt }}"
+        dest: /etc/node_exporter/web-config.yml
+        owner: root
+        group: node_exporter
+        mode: "0640"
+
+    - name: Create textfile directory
+      ansible.builtin.file:
+        path: "{{ textfile_dir }}"
+        state: directory
+        mode: "0755"
+
+    # Only SMART metrics need it: a host with broken apt sources still gets node_exporter and GPU/disk metrics.
+    - name: Install smartmontools
+      ansible.builtin.apt:
+        name: smartmontools
+        update_cache: true
+        cache_valid_time: 86400
+      register: smartmontools
+      ignore_errors: true
+
+    - name: Warn that SMART metrics are skipped
+      ansible.builtin.debug:
+        msg: >-
+          Could not install smartmontools on {{ inventory_hostname }} ({{ smartmontools.msg | default('') }}):
+          SMART disk health is not collected until apt works there (fix its apt sources, then re-run install).
+      when: smartmontools is failed
+
+    - name: Create labdeck-agent directory
+      ansible.builtin.file:
+        path: "{{ agent_bin | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install labdeck-agent
+      ansible.builtin.copy:
+        src: "{{ agent_src }}"
+        dest: "{{ agent_bin }}"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart lab units
+
+    # Before labdeck-agent the collectors were scripts here (gpu.sh, procs.py, du.sh, smartmon.py).
+    - name: Remove the old textfile scripts
+      ansible.builtin.file:
+        path: /usr/local/lib/lab-textfile
+        state: absent
+
+    - name: Install systemd units
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: /etc/systemd/system/{{ item.key }}
+        mode: "0644"
+      loop: "{{ units | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      notify: Restart lab units
+
+    - name: Enable and start units
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop: "{{ running_units }}"
+
+    - name: Check the host firewall
+      ansible.builtin.command: ufw status
+      register: ufw
+      changed_when: false
+      failed_when: false # no ufw installed: nothing to open
+
+    # ponytail: only ufw (Ubuntu's default firewall front-end); hosts using firewalld or raw iptables need the
+    # port opened by hand.
+    - name: Let the monitoring host reach node_exporter through ufw
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ monitoring_source }}"
+        to_port: "{{ node_exporter_port | default(9100) | string }}"
+        proto: tcp
+        comment: labdeck node_exporter
+      when: "'Status: active' in ufw.stdout and monitoring_source | default('') | length > 0"
+
+    - name: Warn that ufw will block the scrape
+      ansible.builtin.debug:
+        msg: >-
+          ufw is active on {{ inventory_hostname }} but MONITORING_SOURCE is not set, so port
+          {{ node_exporter_port | default(9100) }} was not opened; Prometheus will not reach this host.
+      when: "'Status: active' in ufw.stdout and monitoring_source | default('') | length == 0"
+
+  handlers:
+    - name: Restart lab units
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+        daemon_reload: true
+      loop: "{{ running_units }}"

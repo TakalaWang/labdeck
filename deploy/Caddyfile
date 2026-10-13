@@ -1,0 +1,27 @@
+{
+	# 憑證來源由 CADDY_TLS 選（caddy-tls/ 下的檔案）；SITE_ADDRESS 為 http:// 或 :80 時不影響：
+	#   local（預設）：Caddy 內部 CA 簽，瀏覽器會出現憑證警告
+	#   cloudflare：Let's Encrypt DNS-01，網域在 Cloudflare、主機只限校內也能拿到正式憑證（需 CLOUDFLARE_API_TOKEN）
+	#   public：Let's Encrypt HTTP-01，SITE_ADDRESS 有公開 DNS 且外網連得到 80/443 時用
+	#   自備憑證（例如學校 CA 簽發）：在站點區塊加 tls /certs/cert.pem /certs/key.pem ，並在 compose.yaml 的 caddy 加掛 ./certs:/certs:ro
+	import /etc/caddy/tls/{$CADDY_TLS:local}
+}
+
+{$SITE_ADDRESS} {
+	header {
+		defer
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		# 網頁由 web 自帶同一套 CSP 再加上每次請求的 nonce（Next.js 的啟動 script 需要），API 回應自帶 default-src 'none'；
+		# 這裡只在回應沒有 CSP 時補上（?）。登入是整頁導向（/login → 302 到 OAuth provider），不是表單送出，所以 form-action 'self' 即可
+		?Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+		-X-Powered-By
+	}
+
+	# 網頁、JSON API 與 OAuth 登入流程都由 web（Next.js）處理（docs/design.md 約定 G）；
+	# /_next/static/* 的檔名含 hash，web 自己送長期快取的 Cache-Control
+	encode zstd gzip
+	reverse_proxy web:3000
+}

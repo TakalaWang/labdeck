@@ -1,0 +1,13 @@
+{
+  "name": "@labdeck/core",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Shared logic of web and runner: config, SQLite, validators, jobs, ingest, notifications queue, Prometheus queries",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  }
+}

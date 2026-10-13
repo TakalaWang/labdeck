@@ -1,0 +1,198 @@
+---
+# Manage lab accounts from a portal `users` job (docs/design.md 約定 F):
+#   -e @job.yml   where job.yml = !unsafe {"target_hosts": "gpu01", "temp_password": "...", "accounts": {"gpu01": [...]},
+#                                          "reserved_users": ["root", "labbot", "admin"], "keys_only": true}
+# Never touches groups, never changes an existing uid/group/home. An account is removed only for an entry with
+# state absent (queued by an admin, always previewed); its home directory only with remove_home, and only when it is
+# that account's own directory (<dir>/<username>, owned by its uid).
+# keys_only (auto-confirmed jobs nobody previewed): only adds/removes SSH keys of accounts that already exist.
+# only_user (an admin's one-host assignment, applied without a preview): every account but this one is ignored.
+- name: Manage lab user accounts
+  hosts: "{{ target_hosts }}"
+  become: true
+  vars:
+    job_accounts: "{{ accounts[inventory_hostname] | default([]) }}"
+    my_accounts: "{{ job_accounts if only_user is not defined else job_accounts | selectattr('username', '==', only_user) | list }}"
+    # "existing" / "new" are relative to the getent snapshot taken before any change.
+    existing: "{{ my_accounts | selectattr('username', 'in', ansible_facts.getent_passwd) }}"
+    new_present: "{{ my_accounts | rejectattr('username', 'in', ansible_facts.getent_passwd) | selectattr('state', '==', 'present') }}"
+    use_temp_password: "{{ temp_password | default('') | length > 0 }}"
+    reserved: "{{ reserved_users | default(['root', 'labbot']) + ['root'] }}"
+    accounts_too: "{{ not (keys_only | default(false)) }}"
+    # For the current loop item: shadow's expiry day is the first day logins are refused, so it is the day after
+    # <expires> (usable through <expires>, UTC). As epoch seconds for the user module, which keeps the UTC date. -1 = never.
+    item_expires: >-
+      {{ -1 if item.expires | default(none) is none else
+      ((item.expires | to_datetime('%Y-%m-%d') - '1970-01-01' | to_datetime('%Y-%m-%d')).days + 1) * 86400 }}
+  tasks:
+    - name: Validate job
+      ansible.builtin.assert:
+        that:
+          - target_hosts | length > 0
+          - accounts is mapping
+          - my_accounts is sequence and my_accounts is not string
+          - my_accounts | map(attribute='username') | unique | length == my_accounts | length
+          - only_user is not defined or (target_hosts.split(',') | length == 1 and my_accounts | length == 1)
+        quiet: true
+
+    - name: Validate account entries
+      ansible.builtin.assert:
+        that:
+          - item.username is string
+          - item.username is match('^[a-z_][a-z0-9_-]{0,31}\Z')
+          - item.username not in reserved
+          - item.state in ['present', 'locked', 'absent']
+          - item.remove_home is not defined or (item.state == 'absent' and item.remove_home is boolean)
+          - item.uid is not defined or (item.uid is integer and item.uid >= 1000)
+          - item.expires | default(none) is none or (item.expires is string and item.expires is match('^\d{4}-\d{2}-\d{2}\Z'))
+        quiet: true
+      loop: "{{ my_accounts }}"
+      loop_control:
+        label: "{{ item.username | default('?') }}"
+
+    - name: Read passwd database
+      ansible.builtin.getent:
+        database: passwd
+
+    - name: Read shadow database
+      ansible.builtin.getent:
+        database: shadow
+
+    - name: Check existing accounts are regular users with the expected UID
+      ansible.builtin.assert:
+        that:
+          - host_uid | int >= 1000
+          - host_uid | int <= 65533
+          - item.uid is not defined or item.uid == host_uid | int
+        fail_msg: "{{ item.username }} has uid {{ host_uid }} on this host, expected {{ item.uid | default('1000-65533') }}"
+        quiet: true
+      vars:
+        host_uid: "{{ ansible_facts.getent_passwd[item.username][1] }}"
+      loop: "{{ existing }}"
+      loop_control:
+        label: "{{ item.username }}"
+
+    - name: Check new accounts have a centrally assigned UID
+      ansible.builtin.assert:
+        that: item.uid is defined
+        fail_msg: "{{ item.username }} does not exist on this host; creating it needs a fixed uid"
+        quiet: true
+      loop: "{{ new_present }}"
+      loop_control:
+        label: "{{ item.username }}"
+
+    - name: Check that a key-only job creates no account
+      ansible.builtin.assert:
+        that: new_present | length == 0
+        fail_msg: "key-only job would create {{ new_present | map(attribute='username') | join(', ') }}; use a previewed sync"
+        quiet: true
+      when: not accounts_too
+
+    - name: Create new accounts
+      ansible.builtin.user:
+        name: "{{ item.username }}"
+        uid: "{{ item.uid }}"
+        create_home: true
+        shell: /bin/bash
+        password: "{{ temp_password | password_hash('sha512') if use_temp_password else omit }}"
+        update_password: on_create
+        expires: "{{ item_expires }}"
+      loop: "{{ new_present }}"
+      loop_control:
+        label: "{{ item.username }}"
+      when: accounts_too
+      register: created
+
+    # command is skipped in --check, so nothing happens for accounts that were only pretend-created.
+    - name: Force a password change at first login
+      ansible.builtin.command:
+        argv: [chage, -d, "0", "{{ item.item.username }}"]
+      loop: "{{ created.results | selectattr('changed') }}"
+      loop_control:
+        label: "{{ item.item.username }}"
+      when: use_temp_password
+      changed_when: true
+
+    - name: Update existing active accounts
+      ansible.builtin.user:
+        name: "{{ item.username }}"
+        create_home: false # an archived (moved away) home stays gone
+        expires: "{{ item_expires }}"
+        # Unlock only a real hash locked by usermod -L; a bare "!" or "*" means key-only login.
+        password_lock: "{{ false if ansible_facts.getent_shadow[item.username][0].startswith('!$') else omit }}"
+      loop: "{{ existing | selectattr('state', '==', 'present') }}"
+      loop_control:
+        label: "{{ item.username }}"
+      when: accounts_too
+
+    - name: Lock accounts
+      ansible.builtin.user:
+        name: "{{ item.username }}"
+        create_home: false
+        password_lock: true
+        expires: 86400 # shadow day 1 (1970-01-02): expired
+      loop: "{{ existing | selectattr('state', '==', 'locked') }}"
+      loop_control:
+        label: "{{ item.username }}"
+      when: accounts_too
+
+    # Deletion. The uid was checked above; userdel refuses an account that still runs processes.
+    - name: Look at the home directories to remove
+      ansible.builtin.stat:
+        path: "{{ ansible_facts.getent_passwd[item.username][4] }}"
+        follow: false
+      loop: "{{ existing | selectattr('state', '==', 'absent') | selectattr('remove_home', 'defined') | selectattr('remove_home') }}"
+      loop_control:
+        label: "{{ item.username }}"
+      when: accounts_too
+      register: homes
+
+    - name: Check each home to remove is the account's own directory
+      ansible.builtin.assert:
+        that:
+          - home is match('^/[^/]+/[^/]+')
+          - home | basename == item.item.username
+          - not item.stat.exists or (item.stat.isdir and item.stat.uid == ansible_facts.getent_passwd[item.item.username][1] | int)
+        fail_msg: "{{ item.item.username }}: home {{ home }} is not its own directory; not removing anything"
+        quiet: true
+      vars:
+        home: "{{ ansible_facts.getent_passwd[item.item.username][4] }}"
+      loop: "{{ homes.results | default([]) | selectattr('stat', 'defined') }}"
+      loop_control:
+        label: "{{ item.item.username }}"
+
+    - name: Remove accounts
+      ansible.builtin.user:
+        name: "{{ item.username }}"
+        state: absent
+        remove: "{{ item.remove_home | default(false) }}"
+      loop: "{{ existing | selectattr('state', '==', 'absent') }}"
+      loop_control:
+        label: "{{ item.username }}{{ ' (and home)' if item.remove_home | default(false) else '' }}"
+      when: accounts_too
+
+    # The key tasks run as the account itself: authorized_key follows symlinks, so as root a user's
+    # ~/.ssh/authorized_keys -> /etc/shadow would be chowned to them (and its content shown in --diff).
+    # Such a trap now only fails that user's item; removals go first so it can't hold back anyone's revocation.
+    - name: Remove SSH keys
+      ansible.posix.authorized_key:
+        user: "{{ item.0.username }}"
+        key: "{{ item.1 }}"
+        state: absent
+      become_user: "{{ item.0.username }}"
+      loop: "{{ my_accounts | selectattr('state', '==', 'present') | subelements('keys_remove', skip_missing=true) }}"
+      loop_control:
+        label: "{{ item.0.username }} {{ item.1.split() | last }}"
+      # Accounts that --check only pretends to create don't exist yet.
+      when: not ansible_check_mode or item.0.username in ansible_facts.getent_passwd
+
+    - name: Add SSH keys
+      ansible.posix.authorized_key:
+        user: "{{ item.0.username }}"
+        key: "{{ item.1 }}"
+        state: present
+      become_user: "{{ item.0.username }}"
+      loop: "{{ my_accounts | selectattr('state', '==', 'present') | subelements('keys_add', skip_missing=true) }}"
+      loop_control:
+        label: "{{ item.0.username }} {{ item.1.split() | last }}"
+      when: not ansible_check_mode or item.0.username in ansible_facts.getent_passwd

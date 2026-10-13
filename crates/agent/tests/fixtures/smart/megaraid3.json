@@ -1,0 +1,16 @@
+{
+  "smartctl": {"version": [7, 2], "exit_status": 0},
+  "device": {"name": "/dev/bus/0", "type": "megaraid,3", "protocol": "SCSI"},
+  "model_name": "",
+  "scsi_model_name": "HGST HUH721212AL",
+  "serial_number": null,
+  "smart_status": {"passed": true},
+  "temperature": {"current": 36.0},
+  "ata_smart_attributes": {
+    "table": [
+      {"id": 5, "raw": {"value": 1}},
+      {"id": 5, "raw": {"value": 2}},
+      {"id": 197, "raw": {}}
+    ]
+  }
+}

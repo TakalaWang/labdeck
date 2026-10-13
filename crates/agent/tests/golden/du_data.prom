@@ -1,0 +1,6 @@
+lab_du_success_timestamp_seconds{root="BASE/data0"} 1790000000
+lab_du_success_timestamp_seconds{root="BASE/data1"} 1790000000
+lab_du_success_timestamp_seconds{root="BASE/datafile-dir"} 1790000000
+lab_user_disk_bytes{root="BASE/data0",path="BASE/data0/proj",owner="alice"} 16384
+lab_user_disk_bytes{root="BASE/data1",path="BASE/data1/scratch",owner="UNKNOWN"} 28672
+lab_user_disk_bytes{root="BASE/datafile-dir",path="BASE/datafile-dir/x",owner="alice"} 4096

@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files: [rules.yml] # 相對於本檔所在目錄
+
+alerting:
+  alertmanagers:
+    - static_configs: [{targets: ["alertmanager:9093"]}]
+
+scrape_configs:
+  # targets.json 由 runner 依 portal 的 hosts 表產生（docs/design.md 約定 C）；
+  # 目標自帶的 instance（主機名稱）與 group label 會保留，不會被改成 ip:port
+  - job_name: node
+    scheme: https
+    tls_config:
+      ca_file: /etc/node_exporter/tls.crt
+      server_name: node-exporter
+    basic_auth:
+      username: prometheus
+      password_file: /run/secrets/node_exporter_password
+    file_sd_configs:
+      - files: [/etc/prometheus/sd/targets.json]
+
+  - job_name: prometheus
+    static_configs: [{targets: ["localhost:9090"]}]
+
+  - job_name: alertmanager
+    static_configs: [{targets: ["alertmanager:9093"]}]

@@ -1,0 +1,146 @@
+groups:
+  - name: lab
+    rules:
+      - alert: HostDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} 無法連線"
+          description: "{{ $labels.instance }} 的 node_exporter 已超過 5 分鐘抓不到（關機、斷網或 node_exporter 停止）。"
+
+      - alert: DiskAlmostFull
+        expr: |
+          node_filesystem_avail_bytes{fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs"} < 0.10
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 的 {{ $labels.mountpoint }} 剩餘空間不足 10%"
+          description: "{{ $labels.instance }} {{ $labels.mountpoint }}（{{ $labels.device }}）剩餘 {{ $value | humanizePercentage }}。"
+
+      # 依過去 6 小時的趨勢（predict_linear）3 天內會寫滿，且剩餘已不到 20%；持續 1 小時才告警，短暫的大量寫入不算。
+      # 只看實體檔案系統（同 MountMissing）。
+      - alert: DiskWillFill
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs|autofs|nfs.*|cifs|smb3|fuse.*"}[6h], 3 * 24 * 3600) < 0
+            and
+          node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs|autofs|nfs.*|cifs|smb3|fuse.*"}
+            / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs|autofs|nfs.*|cifs|smb3|fuse.*"} < 0.20
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 的 {{ $labels.mountpoint }} 預計 3 天內寫滿"
+          description: "{{ $labels.instance }} {{ $labels.mountpoint }}（{{ $labels.device }}）剩餘不到 20%，照過去 6 小時的寫入速度 3 天內會用完，請通知使用者清理。"
+
+      # 記憶體告警附上該主機記憶體用量最多的使用者（labdeck-agent textfile procs 的 lab_user_memory_bytes；還沒有這個指標的主機就不附）。
+      - alert: MemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 可用記憶體不足 5%"
+          description: >-
+            {{ $labels.instance }} 可用記憶體只剩 {{ $value | humanizePercentage }}，已持續 10 分鐘，程式隨時可能被 OOM killer 終止。
+            {{- with printf "topk(1, lab_user_memory_bytes{instance=%q})" $labels.instance | query }}{{ with . | first -}}
+            記憶體用量最多的是 {{ .Labels.user }}（{{ .Value | humanize1024 }}B）。{{ end }}{{ end }}
+
+      # 沒有 swap 的主機（SwapTotal 為 0）比較結果是 NaN，不會觸發。
+      - alert: SwapHeavy
+        expr: |
+          1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes > 0.5
+            and
+          rate(node_vmstat_pswpout[5m]) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 大量使用 swap"
+          description: >-
+            {{ $labels.instance }} 的 swap 已用 {{ $value | humanizePercentage }}，且過去 15 分鐘持續有記憶體被換出到 swap，程式會明顯變慢。
+            {{- with printf "topk(1, lab_user_memory_bytes{instance=%q})" $labels.instance | query }}{{ with . | first -}}
+            記憶體用量最多的是 {{ .Labels.user }}（{{ .Value | humanize1024 }}B）。{{ end }}{{ end }}
+
+      - alert: OOMKill
+        expr: increase(node_vmstat_oom_kill[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 有程式被 OOM killer 終止"
+          description: >-
+            {{ $labels.instance }} 過去 15 分鐘內記憶體不足，OOM killer 終止了程式（約 {{ $value | printf "%.0f" }} 次），被終止的是哪個程式可在主機上用 journalctl -k | grep -i oom 查看。
+            {{- with printf "topk(1, lab_user_memory_bytes{instance=%q})" $labels.instance | query }}{{ with . | first -}}
+            目前記憶體用量最多的是 {{ .Labels.user }}（{{ .Value | humanize1024 }}B）。{{ end }}{{ end }}
+
+      - alert: GpuHot
+        expr: lab_gpu_temperature_celsius > 85
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} GPU {{ $labels.gpu }} 溫度過高"
+          description: "{{ $labels.instance }} GPU {{ $labels.gpu }} 已超過 5 分鐘高於 85°C（目前 {{ $value }}°C），請檢查風扇與機房空調。"
+
+      # ponytail: 刻意移除 GPU 後會持續告警 7 天（max_over_time 視窗），請在 Alertmanager silence
+      - alert: GpuMissing
+        expr: |
+          lab_gpu_smi_count < lab_gpu_pci_count
+            or
+          lab_gpu_smi_count < max_over_time(lab_gpu_smi_count[7d])
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} 有 GPU 消失"
+          description: "{{ $labels.instance }} 的 nvidia-smi 只看到 {{ $value }} 張 GPU，少於 lspci 數量或過去 7 天的最大值（可能 fallen off the bus，需重開機）。"
+
+      - alert: NvidiaSmiFailing
+        expr: lab_nvidia_smi_ok == 0 and lab_gpu_pci_count > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} nvidia-smi 執行失敗"
+          description: "{{ $labels.instance }} 的 nvidia-smi 已連續 10 分鐘失敗（driver 異常或更新後未重開機）。"
+
+      # 實體檔案系統數量（排除 tmpfs、容器、snap、網路與 FUSE 掛載，這些會隨使用情況增減）。
+      # `or 0 * ...` 讓掛載點全部消失（count 變成空的）時仍能比較；主機整台掛掉則交給 HostDown。
+      # ponytail: 刻意卸載或拔掉硬碟後會持續告警 7 天（max_over_time 視窗），請在 Alertmanager silence
+      - alert: MountMissing
+        expr: |
+          (
+              count by (instance) (node_filesystem_size_bytes{job="node",fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs|autofs|nfs.*|cifs|smb3|fuse.*"})
+            or
+              0 * group by (instance) (up{job="node"} == 1)
+          )
+          < max_over_time(count by (instance) (node_filesystem_size_bytes{job="node",fstype!~"tmpfs|devtmpfs|ramfs|overlay|squashfs|nsfs|autofs|nfs.*|cifs|smb3|fuse.*"})[7d:1h])
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} 有檔案系統掛載不見了"
+          description: "{{ $labels.instance }} 目前只有 {{ $value }} 個檔案系統掛載，少於過去 7 天的最大值；資料碟可能沒掛上，使用者可能正在寫入根目錄。"
+
+      - alert: SmartUnhealthy
+        expr: lab_smart_healthy == 0
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} 硬碟 {{ $labels.device }} SMART 異常"
+          description: "{{ $labels.instance }} {{ $labels.device }}（{{ $labels.model }} {{ $labels.serial }}）SMART overall-health 未通過，請備份並更換。"
+
+      - alert: TextfileStale
+        expr: |
+          time() - node_textfile_mtime_seconds{file=~".*/gpu.prom"} > 300
+          or time() - node_textfile_mtime_seconds{file=~".*/procs.prom"} > 300
+          or time() - node_textfile_mtime_seconds{file=~".*/smart.prom"} > 3 * 3600
+          or time() - node_textfile_mtime_seconds{file=~".*/du_home.prom"} > 2 * 86400
+          or time() - node_textfile_mtime_seconds{file=~".*/du_data.prom"} > 8 * 86400
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 的 {{ $labels.file }} 沒有更新"
+          description: "{{ $labels.instance }} 的 {{ $labels.file }} 已 {{ $value | humanizeDuration }} 未更新，對應的收集腳本（systemd timer）可能失敗。"
+
+      # node_exporter 解析不了 textfile 目錄裡的某個 .prom（格式錯誤，例如標籤值沒跳脫）時會跳過該檔，
+      # 它的 mtime 指標也跟著消失，所以 TextfileStale 看不到。
+      - alert: TextfileScrapeError
+        expr: node_textfile_scrape_error == 1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} 的 textfile 指標讀取失敗"
+          description: "{{ $labels.instance }} 的 node_exporter 已超過 15 分鐘無法解析 /var/lib/node_exporter/textfile/ 內的某個 .prom 檔（node_exporter 的 log 會寫是哪個檔），該檔的指標（GPU、使用者 CPU／記憶體、磁碟用量或 SMART）沒有更新。"

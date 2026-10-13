@@ -1,0 +1,11 @@
+lab_smart_healthy{device="/dev/bus/0 megaraid,3",model="HGST HUH721212AL",serial="None"} 1
+lab_smart_healthy{device="/dev/nvme0",model="Samsung SSD 980 PRO 1TB",serial="S5GXNX0R"} 0
+lab_smart_healthy{device="/dev/sda",model="ST4000NM000A-2HZ100 \"x\\y\"",serial="ZC1ABCDE"} 1
+lab_smart_nvme_media_errors{device="/dev/nvme0"} 2
+lab_smart_nvme_percentage_used{device="/dev/nvme0"} 103
+lab_smart_pending_sectors{device="/dev/sda"} 0
+lab_smart_reallocated_sectors{device="/dev/bus/0 megaraid,3"} 2
+lab_smart_reallocated_sectors{device="/dev/sda"} 8
+lab_smart_temperature_celsius{device="/dev/bus/0 megaraid,3"} 36.0
+lab_smart_temperature_celsius{device="/dev/nvme0"} 45
+lab_smart_temperature_celsius{device="/dev/sda"} 34

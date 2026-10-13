@@ -1,0 +1,14 @@
+{
+  "name": "@labdeck/e2e",
+  "private": true,
+  "description": "End-to-end tests; run via e2e/run.sh",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.19.0",
+    "typescript": "6.0.3"
+  }
+}

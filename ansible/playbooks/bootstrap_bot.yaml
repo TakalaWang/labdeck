@@ -1,0 +1,88 @@
+---
+# One-time setup of the bot account ($BOT_USER, default labbot) used by the runner. Run by a human with an
+# existing admin account from the cli container; needs vault vars (-e @/run/secrets/vault.yml):
+#   docker compose run --rm cli ansible-playbook playbooks/bootstrap_bot.yaml -l gpu01 -u <admin> \
+#     --ask-pass --ask-become-pass -e @/run/secrets/vault.yml -e monitoring_host_ip=<IP the runner connects from>
+# Hosts whose admin passwords differ: instead of --ask-pass/--ask-become-pass, pass a vault-encrypted
+# -e @/run/secrets/bootstrap_passwords.yml = {bootstrap_passwords: {<host>: <password>}} listing every target host
+# (docs/deploy.md). It is only needed for this one-time run; delete it afterwards.
+# The host key is trusted on first use (ssh-keyscan) and added to $KNOWN_HOSTS before the first SSH connection.
+- name: Bootstrap the bot account
+  hosts: "{{ target_hosts | default('all') }}"
+  become: true
+  vars:
+    bot_user: "{{ lookup('env', 'BOT_USER') | default('labbot', true) }}"
+    monitoring_host_ip: "{{ lookup('env', 'MONITORING_SOURCE') }}" # -e monitoring_host_ip=… overrides
+  tasks:
+    - name: Validate arguments
+      ansible.builtin.assert:
+        that:
+          - monitoring_host_ip is defined
+          - monitoring_host_ip | length > 0
+
+    - name: Scan host key
+      ansible.builtin.command:
+        argv: [ssh-keyscan, -t, ed25519, "{{ ansible_host }}"]
+      register: keyscan
+      changed_when: false
+      # ssh-keyscan also prints a "# host:22 SSH-2.0-..." banner comment on stdout
+      failed_when: keyscan.stdout_lines | reject('match', '#') | length == 0
+      # sshd may shed the connection before the banner (see ansible.cfg retries)
+      until: keyscan.stdout_lines | reject('match', '#') | length > 0
+      retries: 5
+      delay: 3
+      delegate_to: localhost
+      become: false
+
+    - name: Add host key to known_hosts
+      ansible.builtin.known_hosts:
+        path: "{{ lookup('env', 'KNOWN_HOSTS') | default('/data/known_hosts', true) }}"
+        name: "{{ ansible_host }}"
+        key: "{{ keyscan.stdout_lines | reject('match', '#') | first }}"
+      delegate_to: localhost
+      become: false
+      throttle: 1 # one writer at a time on the shared file
+
+    - name: Check bootstrap_passwords lists this host
+      ansible.builtin.assert:
+        that: inventory_hostname in bootstrap_passwords
+        fail_msg: "bootstrap_passwords has no password for {{ inventory_hostname }}"
+        quiet: true
+      when: bootstrap_passwords is defined
+
+    # Before the first connection to the host: connection vars set as facts override --ask-pass.
+    - name: Use this host's own admin password from bootstrap_passwords
+      ansible.builtin.set_fact:
+        ansible_password: "{{ bootstrap_passwords[inventory_hostname] }}"
+        ansible_become_password: "{{ bootstrap_passwords[inventory_hostname] }}"
+      when: bootstrap_passwords is defined
+      no_log: true
+
+    - name: Create bot system user
+      ansible.builtin.user:
+        name: "{{ bot_user }}"
+        system: true
+        shell: /bin/bash
+        create_home: true
+        # A different sudo password per host (the runner derives the same one, docs/design.md 約定 F), so a
+        # root on one host can't learn the bot's password on the others. The per-host fixed salt keeps reruns
+        # idempotent while still following vault changes.
+        password: >-
+          {{ (vault_bot_become_password ~ inventory_hostname) | hash('sha256')
+          | password_hash('sha512', (inventory_hostname | hash('sha256'))[:16]) }}
+
+    - name: Allow the bot to sudo with its password
+      ansible.builtin.copy:
+        content: "{{ bot_user }} ALL=(ALL) ALL\n"
+        dest: /etc/sudoers.d/{{ bot_user }}
+        owner: root
+        group: root
+        mode: "0440"
+        validate: visudo -cf %s
+
+    - name: Authorize the runner SSH key
+      ansible.posix.authorized_key:
+        user: "{{ bot_user }}"
+        key: "{{ lookup('ansible.builtin.file', '/run/secrets/ssh_key.pub') }}"
+        key_options: 'from="{{ monitoring_host_ip }}"'
+        exclusive: true

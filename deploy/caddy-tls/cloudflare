@@ -1,0 +1,7 @@
+# DNS-01 via Cloudflare. Skip Caddy's own propagation check: campus networks often block DNS queries to
+# outside authoritative servers; wait a fixed delay and let Let's Encrypt verify from the internet instead.
+cert_issuer acme {
+	dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	propagation_delay 30s
+	propagation_timeout -1
+}

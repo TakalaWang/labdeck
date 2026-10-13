@@ -1,0 +1,218 @@
+# 開發環境（docs/docker.md）：全部在容器內，主機只需要 Docker。通常經由 ./labdeck 使用：
+#   ./labdeck dev              起整套：http://localhost:8080 （Next.js dev server 與 runner 改 code 即時生效；以 dev 登入是管理員）
+#   ./labdeck tool npm test    在 toolbox 內跑任何指令（= docker compose -f compose.dev.yaml run --rm toolbox …）
+# 與正式的 compose.yaml 無關：不讀 .env、不用 secrets/、沒有 TLS。假 OAuth（任何名稱都能登入）與假主機 gpu01 同 e2e，
+# port 只綁 127.0.0.1；測試用的 secrets 產生在 volume 內。與 e2e 共用 8080、9999 port，不能同時跑。
+name: labdeck-dev
+
+x-env: &env
+  TZ: Asia/Taipei
+  PUBLIC_URL: http://localhost:8080
+  SITE_NAME: LabDeck（開發）
+  SESSION_SECRET: dev-only-session-secret-never-use-in-production
+  PROMETHEUS_URL: http://prometheus:9090
+  OAUTH_NAME: MockSSO
+  OAUTH_CLIENT_ID: e2e-client
+  OAUTH_CLIENT_SECRET: e2e-client-secret
+  OAUTH_AUTHORIZE_URL: http://localhost:9999/authorize
+  OAUTH_TOKEN_URL: http://mock-oauth:9999/token
+  OAUTH_PROFILE_URL: http://mock-oauth:9999/profile
+  DISCORD_WEBHOOK_URL: http://mock-oauth:9999/discord
+  DISCORD_CLIENT_ID: e2e-discord
+  DISCORD_CLIENT_SECRET: e2e-discord-secret
+  DISCORD_AUTHORIZE_URL: http://localhost:9999/discord/oauth2/authorize
+  DISCORD_TOKEN_URL: http://mock-oauth:9999/discord/api/oauth2/token
+  DISCORD_PROFILE_URL: http://mock-oauth:9999/discord/api/users/@me
+  SMTP_HOST: mock-oauth
+  SMTP_PORT: "2525"
+  SMTP_SECURITY: none
+  SMTP_FROM: lab@example.edu
+  RESERVED_USERS: admin
+  MONITORING_SOURCE: 172.31.251.0/24 # = the lab network below
+  LABDECK_CORE_DIR: /src/packages/core
+
+# Node 24 + Rust（dev/toolbox.Dockerfile）。原始碼掛在 /src；node_modules、.next、cargo 放 volume（不混入主機的檔案）。
+# dev/entrypoint.sh 以 /src 的 owner 身分執行（Linux 上 = 主機使用者）。
+x-toolbox: &toolbox
+  build:
+    context: dev
+    dockerfile: toolbox.Dockerfile
+  image: labdeck-toolbox:local
+  user: "0:0"
+  entrypoint: [/src/dev/entrypoint.sh]
+  working_dir: /src
+  networks: [lab]
+
+services:
+  # 檢查與測試：docker compose -f compose.dev.yaml run --rm toolbox <指令>（./labdeck tool|test|lint）
+  toolbox:
+    <<: *toolbox
+    profiles: [tools]
+    environment:
+      LABDECK_NPM: "1"
+      LABDECK_VOLUMES: /src/node_modules /src/apps/web/node_modules /src/apps/web/.next /cargo
+    volumes:
+      - .:/src
+      - node_modules:/src/node_modules
+      - web_node_modules:/src/apps/web/node_modules
+      - next_build:/src/apps/web/.next
+      - cargo:/cargo
+
+  # npm ci（package-lock.json 有變動時）；web 與 seed 等它跑完，避免同時安裝
+  deps:
+    <<: *toolbox
+    command: ["true"]
+    environment:
+      LABDECK_NPM: "1"
+      LABDECK_VOLUMES: /src/node_modules /src/apps/web/node_modules
+    volumes:
+      - .:/src
+      - node_modules:/src/node_modules
+      - web_node_modules:/src/apps/web/node_modules
+
+  # 建立 DB 與第一位管理員（SSO ID dev、Linux 帳號 dev；重跑無害）
+  seed:
+    <<: *toolbox
+    command: [node, packages/core/src/cli.ts, add-admin, dev, dev]
+    environment:
+      <<: *env
+      LABDECK_VOLUMES: /data
+    volumes:
+      - .:/src
+      - node_modules:/src/node_modules
+      - data:/data
+    depends_on:
+      deps: {condition: service_completed_successfully}
+
+  # Next.js dev server（hot reload）：網頁與 JSON API
+  web:
+    <<: *toolbox
+    command: [npm, run, -w, "@labdeck/web", dev, --, --hostname, 0.0.0.0]
+    environment:
+      <<: *env
+      LABDECK_VOLUMES: /src/apps/web/.next /data
+    volumes:
+      - .:/src
+      - node_modules:/src/node_modules
+      - web_node_modules:/src/apps/web/node_modules
+      - next_dev:/src/apps/web/.next
+      - data:/data
+    ports: ["127.0.0.1:8080:3000"]
+    depends_on:
+      seed: {condition: service_completed_successfully}
+      mock-oauth: {condition: service_started}
+
+  # 測試用 secrets（同 e2e：scripts/init-secrets.sh），只在 volume 是空的時候產生
+  secrets:
+    image: labdeck-runner:local
+    build: &runner-build
+      context: .
+      dockerfile: apps/runner/Dockerfile
+      additional_contexts:
+        agent: ./crates/agent
+    user: "0:0"
+    environment:
+      DISCORD_WEBHOOK: http://mock-oauth:9999/discord
+    # 交給跑 runner 的使用者（ansible/ 的 owner，同 dev/entrypoint.sh）；prometheus、alertmanager（nobody）要讀其中幾個檔
+    command:
+      - sh
+      - -c
+      - >-
+        test -e /secrets/vault.yml || { labdeck-init-secrets /secrets >/dev/null
+        && chown -R "$$(stat -c %u:%g /repo/ansible)" /secrets && chmod 755 /secrets
+        && chmod 644 /secrets/* && chmod 600 /secrets/ssh_key /secrets/vault_pass; }
+    volumes:
+      - dev_secrets:/secrets
+      - ./ansible:/repo/ansible:ro
+    networks: [lab]
+
+  # runner：image 內的 ansible 與 labdeck-agent，原始碼與 playbook 從工作目錄掛入，node --watch 改了就重啟
+  runner:
+    image: labdeck-runner:local
+    build: *runner-build
+    user: "0:0"
+    entrypoint: [/usr/local/bin/dev-entrypoint]
+    command: [node, --watch, /app/apps/runner/src/main.ts]
+    environment:
+      <<: *env
+      NODE_ENV: development
+      LABDECK_CORE_DIR: /app/packages/core
+      LABDECK_SRC: /repo/ansible
+      LABDECK_VOLUMES: /data /prom_sd
+      HOME: /home/dev
+      BOT_USER: labbot
+      KNOWN_HOSTS: /data/known_hosts
+      PROM_SD_DIR: /prom_sd
+      ANSIBLE_CONFIG: /repo/ansible/ansible.cfg
+      ANSIBLE_INVENTORY: /usr/local/bin/labdeck-inventory
+      ANSIBLE_VAULT_PASSWORD_FILE: /run/secrets/vault_pass
+      ANSIBLE_SSH_ARGS: -o UserKnownHostsFile=/data/known_hosts -o StrictHostKeyChecking=yes -o ControlMaster=auto -o ControlPersist=30m -o ServerAliveInterval=30
+    volumes:
+      - ./dev/entrypoint.sh:/usr/local/bin/dev-entrypoint:ro
+      - ./apps/runner/src:/app/apps/runner/src:ro
+      - ./packages/core/src:/app/packages/core/src:ro
+      - ./packages/core/schema.sql:/app/packages/core/schema.sql:ro
+      - ./packages/core/guide.md:/app/packages/core/guide.md:ro
+      - ./ansible:/repo/ansible:ro
+      - data:/data
+      - prom_sd:/prom_sd
+      - dev_secrets:/run/secrets:ro
+    depends_on:
+      secrets: {condition: service_completed_successfully}
+      seed: {condition: service_completed_successfully}
+    networks: [lab]
+
+  # 假 OAuth／Discord／SMTP（e2e/mock_oauth.py）：瀏覽器走 localhost:9999，容器走 mock-oauth:9999；收到的內容在 /_sink
+  mock-oauth:
+    image: python:3.12-slim
+    command: [python, -u, /mock/mock_oauth.py]
+    volumes: ["./e2e/mock_oauth.py:/mock/mock_oauth.py:ro"]
+    ports: ["127.0.0.1:9999:9999"]
+    networks: [lab]
+
+  # 假的受管主機（e2e/target：Ubuntu 20.04 + systemd + sshd，既有管理帳號 admin／adminpw），bootstrap 方式見 docs/docker.md
+  gpu01:
+    build: ./e2e/target
+    image: labdeck-e2e-host:local
+    hostname: gpu01
+    privileged: true
+    cgroup: host
+    volumes: ["/sys/fs/cgroup:/sys/fs/cgroup:rw"]
+    tmpfs: [/run, /run/lock]
+    networks: [lab]
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command: [--config.file=/etc/prometheus/config/prometheus.yml, --storage.tsdb.path=/prometheus]
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus/config:ro
+      - prom_sd:/etc/prometheus/sd:ro
+      - dev_secrets:/run/secrets:ro # node_exporter_password
+      - {type: volume, source: dev_secrets, target: /etc/node_exporter/tls.crt, read_only: true, volume: {subpath: node_exporter.crt}}
+    depends_on:
+      secrets: {condition: service_completed_successfully}
+    networks: [lab]
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - {type: volume, source: dev_secrets, target: /etc/alertmanager/discord_webhook, read_only: true, volume: {subpath: discord_webhook}}
+    depends_on:
+      secrets: {condition: service_completed_successfully}
+    networks: [lab]
+
+networks:
+  lab:
+    ipam:
+      config: [{subnet: 172.31.251.0/24}]
+
+volumes:
+  node_modules:
+  web_node_modules:
+  next_dev:
+  next_build:
+  cargo:
+  data:
+  prom_sd:
+  dev_secrets:

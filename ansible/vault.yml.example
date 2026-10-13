@@ -1,0 +1,22 @@
+# Template for secrets/vault.yml (gitignored, ansible-vault encrypted). The runner and the cli container
+# see it as /run/secrets/vault.yml and pass it with -e @/run/secrets/vault.yml.
+#   cp ansible/vault.yml.example secrets/vault.yml   # fill in real values
+#   openssl rand -base64 32 > secrets/vault_pass
+#   ansible-vault encrypt --vault-password-file secrets/vault_pass secrets/vault.yml
+#
+# node_exporter TLS: a self-signed cert (public) plus its key (secret, stored below):
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+#     -subj /CN=node-exporter -addext subjectAltName=DNS:node-exporter \
+#     -keyout node_exporter.key -out secrets/node_exporter.crt
+# Paste node_exporter.key into vault_node_exporter_tls_key, then delete it.
+#
+# node_exporter basic auth (user "prometheus"). Put the plaintext in secrets/node_exporter_password
+# and its bcrypt hash here:
+#   htpasswd -nbBC 10 "" "$(cat secrets/node_exporter_password)" | tr -d ':\n'
+#   python3 -c 'import bcrypt; print(bcrypt.hashpw(b"the-password", bcrypt.gensalt(10)).decode())'
+vault_bot_become_password: changeme
+vault_node_exporter_basic_auth_bcrypt: "$2y$10$0000000000000000000000000000000000000000000000000000."
+vault_node_exporter_tls_key: |
+  -----BEGIN PRIVATE KEY-----
+  replace-me
+  -----END PRIVATE KEY-----

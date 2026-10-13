@@ -1,0 +1,131 @@
+name: CI
+
+# 檢查都在容器內跑，與本機的 ./labdeck 相同（docs/docker.md）；main 與 v* tag 通過檢查後建置並推送 image 到 GHCR。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      e2e:
+        description: 跑端對端測試（e2e/run.sh，約 10 分鐘）
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: TypeScript（typecheck、lint、vitest、next build）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the toolbox image（dev/toolbox.Dockerfile）
+        run: docker compose -f compose.dev.yaml build toolbox
+      - name: Typecheck
+        run: ./labdeck tool npm run -s typecheck
+      - name: Lint
+        run: ./labdeck tool npm run -s lint
+      - name: vitest（core、API route handler、runner）
+        run: ./labdeck tool npm test
+      - name: next build
+        run: ./labdeck tool npm run -s build
+
+  ansible:
+    name: Ansible（syntax-check）、Prometheus 規則、Alertmanager 設定
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check playbooks（ansible 與 apps/runner/Dockerfile 同版）
+        run: >-
+          docker run --rm -v "$PWD/ansible:/w:ro" python:3.12-slim
+          sh -c 'pip install -q --root-user-action=ignore ansible==12.3.0 && sh /w/syntax-check.sh'
+      - name: Prometheus rules
+        run: docker run --rm -v "$PWD/deploy/prometheus":/w:ro -w /w --entrypoint promtool prom/prometheus:v3.15.0 test rules rules_test.yml
+      - name: Alertmanager config
+        run: docker run --rm -v "$PWD/deploy/alertmanager":/w:ro --entrypoint amtool prom/alertmanager:v0.34.1 check-config /w/alertmanager.yml
+
+  agent:
+    name: labdeck-agent（fmt、clippy、test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the toolbox image（Rust 版本同 crates/agent/rust-toolchain.toml）
+        run: docker compose -f compose.dev.yaml build toolbox
+      - run: ./labdeck tool sh -c 'cd crates/agent && cargo fmt --check'
+      - run: ./labdeck tool sh -c 'cd crates/agent && cargo clippy --all-targets --locked -- -D warnings'
+      - run: ./labdeck tool sh -c 'cd crates/agent && cargo test --locked'
+
+  # ghcr.io/<owner>/labdeck-{web,runner,caddy}：sha-<commit>、main（main 分支）、<版本>、<主.次>、latest（正式版 tag）
+  images:
+    name: Image（${{ matrix.image }}）
+    if: github.event_name == 'push'
+    needs: [node, ansible, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: web
+            file: apps/web/Dockerfile
+          - image: runner
+            file: apps/runner/Dockerfile
+            contexts: agent=crates/agent
+          - image: caddy
+            file: deploy/caddy.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name（GHCR 要小寫）
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/labdeck-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=sha
+            type=raw,value=main,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          build-contexts: ${{ matrix.contexts }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  e2e:
+    name: E2E（手動）
+    if: github.event_name == 'workflow_dispatch' && inputs.e2e
+    needs: [node, ansible, agent]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - run: e2e/run.sh
+      - name: Upload logs and Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            e2e/.work/logs/
+            e2e/playwright-report/
+          retention-days: 7

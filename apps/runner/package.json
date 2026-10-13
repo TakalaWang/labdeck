@@ -1,0 +1,18 @@
+{
+  "name": "@labdeck/runner",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Job runner: allowlisted ansible-playbook jobs, daily schedule, Prometheus file_sd, outbox delivery",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@labdeck/core": "*",
+    "nodemailer": "10.0.15"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "8.0.2"
+  }
+}

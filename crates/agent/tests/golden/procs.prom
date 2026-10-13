@@ -1,0 +1,21 @@
+# HELP lab_user_cpu_cores CPU cores in use by the user's processes.
+# TYPE lab_user_cpu_cores gauge
+lab_user_cpu_cores{user="3999998"} 0.0
+lab_user_cpu_cores{user="alice"} 3.166
+lab_user_cpu_cores{user="bob"} 0.08
+lab_user_cpu_cores{user="root"} 0.0
+lab_user_cpu_cores{user="system"} 0.0
+# HELP lab_user_memory_bytes Resident memory (sum of RSS) of the user's processes.
+# TYPE lab_user_memory_bytes gauge
+lab_user_memory_bytes{user="3999998"} 1024
+lab_user_memory_bytes{user="alice"} 3149824
+lab_user_memory_bytes{user="bob"} 8192
+lab_user_memory_bytes{user="root"} 2097152
+lab_user_memory_bytes{user="system"} 102400
+# HELP lab_user_processes Number of the user's processes.
+# TYPE lab_user_processes gauge
+lab_user_processes{user="3999998"} 1
+lab_user_processes{user="alice"} 3
+lab_user_processes{user="bob"} 1
+lab_user_processes{user="root"} 2
+lab_user_processes{user="system"} 1

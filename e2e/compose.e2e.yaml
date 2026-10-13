@@ -1,0 +1,34 @@
+# e2e 用 override，由 e2e/run.sh 在複製出來的 e2e/.work/app 內執行：
+#   docker compose -f compose.yaml -f e2e/compose.e2e.yaml …
+# 相對路徑以 compose.yaml 所在目錄為準。只綁 127.0.0.1：假 OAuth 讓任何人都能以任何身分登入。
+name: labdeck-e2e
+
+services:
+  caddy:
+    ports: !override ["127.0.0.1:8080:8080"]
+
+  # 假 OAuth provider（瀏覽器走 localhost:9999，web 走 mock-oauth:9999），兼當假 Discord（OAuth + webhook 收件端）
+  # 與 SMTP 收件端（mock-oauth:2525）；測試以 http://localhost:9999/_sink 讀取收到的內容
+  mock-oauth:
+    image: python:3.12-slim
+    command: [python, -u, /mock/mock_oauth.py]
+    volumes: ["./e2e/mock_oauth.py:/mock/mock_oauth.py:ro"]
+    ports: ["127.0.0.1:9999:9999"]
+    networks: [lab]
+
+  # 假的受管主機（沒有 GPU 驅動，lspci 假裝有一張 NVIDIA 卡）：systemd + sshd + 既有管理帳號 admin
+  gpu01:
+    build: ./e2e/target
+    image: labdeck-e2e-host:local
+    hostname: gpu01
+    privileged: true
+    cgroup: host
+    volumes: ["/sys/fs/cgroup:/sys/fs/cgroup:rw"]
+    tmpfs: [/run, /run/lock]
+    networks: [lab]
+
+# 固定網段：.env 的 MONITORING_SOURCE（ufw 放行 node_exporter 的來源）要對得上
+networks:
+  lab:
+    ipam:
+      config: [{subnet: 172.31.250.0/24}]

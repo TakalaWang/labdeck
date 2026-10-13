@@ -1,0 +1,305 @@
+# docker run --rm -v "$PWD":/w -w /w --entrypoint promtool prom/prometheus:v3.15.0 test rules rules_test.yml
+rule_files: [rules.yml]
+evaluation_interval: 1m
+
+tests:
+  - name: HostDown
+    interval: 1m
+    input_series:
+      - series: 'up{job="node",instance="gpu01",group="gpu"}'
+        values: '1 0x10'
+      - series: 'up{job="node",instance="gpu02",group="gpu"}'
+        values: '1x10'
+    alert_rule_test:
+      - alertname: HostDown
+        eval_time: 4m
+        exp_alerts: []
+      - alertname: HostDown
+        eval_time: 7m
+        exp_alerts:
+          - exp_labels: {alertname: HostDown, severity: critical, job: node, instance: gpu01, group: gpu}
+            exp_annotations:
+              summary: "gpu01 無法連線"
+              description: "gpu01 的 node_exporter 已超過 5 分鐘抓不到（關機、斷網或 node_exporter 停止）。"
+
+  - name: DiskWillFill
+    interval: 1m
+    input_series:
+      # gpu01 /：1 TB 裡剩 150 GB（15%），每分鐘少 50 MB（每天 72 GB）→ 3 天內寫滿
+      - series: 'node_filesystem_avail_bytes{job="node",instance="gpu01",mountpoint="/",device="/dev/sda2",fstype="ext4"}'
+        values: '150000000000-50000000x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu01",mountpoint="/",device="/dev/sda2",fstype="ext4"}'
+        values: '1000000000000x120'
+      # gpu02 /data0：寫得一樣快，但還剩 50%，不告警
+      - series: 'node_filesystem_avail_bytes{job="node",instance="gpu02",mountpoint="/data0",device="/dev/sdb1",fstype="xfs"}'
+        values: '500000000000-50000000x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu02",mountpoint="/data0",device="/dev/sdb1",fstype="xfs"}'
+        values: '1000000000000x120'
+      # gpu03 /：只剩 10% 但沒有在變少（交給 DiskAlmostFull），不告警
+      - series: 'node_filesystem_avail_bytes{job="node",instance="gpu03",mountpoint="/",device="/dev/sda2",fstype="ext4"}'
+        values: '100000000000x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu03",mountpoint="/",device="/dev/sda2",fstype="ext4"}'
+        values: '1000000000000x120'
+      # gpu01 的 tmpfs 很快寫滿：不是實體檔案系統，不告警
+      - series: 'node_filesystem_avail_bytes{job="node",instance="gpu01",mountpoint="/run",device="tmpfs",fstype="tmpfs"}'
+        values: '1000000000-5000000x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu01",mountpoint="/run",device="tmpfs",fstype="tmpfs"}'
+        values: '10000000000x120'
+    alert_rule_test:
+      - alertname: DiskWillFill
+        eval_time: 50m
+        exp_alerts: []
+      - alertname: DiskWillFill
+        eval_time: 70m
+        exp_alerts:
+          - exp_labels: {alertname: DiskWillFill, severity: warning, job: node, instance: gpu01, mountpoint: /, device: /dev/sda2, fstype: ext4}
+            exp_annotations:
+              summary: "gpu01 的 / 預計 3 天內寫滿"
+              description: "gpu01 /（/dev/sda2）剩餘不到 20%，照過去 6 小時的寫入速度 3 天內會用完，請通知使用者清理。"
+
+  - name: MemoryLow
+    interval: 1m
+    input_series:
+      # gpu01：5 分鐘後可用記憶體降到 3%，記憶體用量最多的是 alice
+      - series: 'node_memory_MemTotal_bytes{job="node",instance="gpu01"}'
+        values: '107374182400x30'
+      - series: 'node_memory_MemAvailable_bytes{job="node",instance="gpu01"}'
+        values: '21474836480x4 3221225472x25'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu01",user="alice"}'
+        values: '85899345920x30'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu01",user="root"}'
+        values: '1073741824x30'
+      # gpu02：一直只剩 3.125%，但沒有 lab_user_memory_bytes（procs.prom）（說明不附使用者）
+      - series: 'node_memory_MemTotal_bytes{job="node",instance="gpu02"}'
+        values: '68719476736x30'
+      - series: 'node_memory_MemAvailable_bytes{job="node",instance="gpu02"}'
+        values: '2147483648x30'
+      # gpu03：剩 6%，不告警（它的大用量使用者也不會出現在 gpu01 的說明裡）
+      - series: 'node_memory_MemTotal_bytes{job="node",instance="gpu03"}'
+        values: '107374182400x30'
+      - series: 'node_memory_MemAvailable_bytes{job="node",instance="gpu03"}'
+        values: '6442450944x30'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu03",user="carol"}'
+        values: '214748364800x30'
+      # gpu04：只低於 5% 五分鐘，不告警
+      - series: 'node_memory_MemTotal_bytes{job="node",instance="gpu04"}'
+        values: '107374182400x30'
+      - series: 'node_memory_MemAvailable_bytes{job="node",instance="gpu04"}'
+        values: '3221225472x5 53687091200x25'
+    alert_rule_test:
+      - alertname: MemoryLow
+        eval_time: 9m
+        exp_alerts: []
+      - alertname: MemoryLow
+        eval_time: 16m
+        exp_alerts:
+          - exp_labels: {alertname: MemoryLow, severity: warning, job: node, instance: gpu01}
+            exp_annotations:
+              summary: "gpu01 可用記憶體不足 5%"
+              description: "gpu01 可用記憶體只剩 3%，已持續 10 分鐘，程式隨時可能被 OOM killer 終止。記憶體用量最多的是 alice（80GiB）。"
+          - exp_labels: {alertname: MemoryLow, severity: warning, job: node, instance: gpu02}
+            exp_annotations:
+              summary: "gpu02 可用記憶體不足 5%"
+              description: "gpu02 可用記憶體只剩 3.125%，已持續 10 分鐘，程式隨時可能被 OOM killer 終止。"
+
+  - name: SwapHeavy
+    interval: 1m
+    input_series:
+      # gpu01：swap 用了 75% 且持續換出
+      - series: 'node_memory_SwapTotal_bytes{job="node",instance="gpu01"}'
+        values: '8589934592x40'
+      - series: 'node_memory_SwapFree_bytes{job="node",instance="gpu01"}'
+        values: '2147483648x40'
+      - series: 'node_vmstat_pswpout{job="node",instance="gpu01"}'
+        values: '0+100x40'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu01",user="root"}'
+        values: '3221225472x40'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu01",user="system"}'
+        values: '1073741824x40'
+      # gpu02：swap 用了 75%，但都是很久以前換出的（沒有持續換出），不告警
+      - series: 'node_memory_SwapTotal_bytes{job="node",instance="gpu02"}'
+        values: '8589934592x40'
+      - series: 'node_memory_SwapFree_bytes{job="node",instance="gpu02"}'
+        values: '2147483648x40'
+      - series: 'node_vmstat_pswpout{job="node",instance="gpu02"}'
+        values: '5000x40'
+      # gpu03：持續換出但只用了 10%，不告警
+      - series: 'node_memory_SwapTotal_bytes{job="node",instance="gpu03"}'
+        values: '8589934592x40'
+      - series: 'node_memory_SwapFree_bytes{job="node",instance="gpu03"}'
+        values: '7730941132x40'
+      - series: 'node_vmstat_pswpout{job="node",instance="gpu03"}'
+        values: '0+100x40'
+      # gpu04：沒有 swap（0/0），不告警
+      - series: 'node_memory_SwapTotal_bytes{job="node",instance="gpu04"}'
+        values: '0x40'
+      - series: 'node_memory_SwapFree_bytes{job="node",instance="gpu04"}'
+        values: '0x40'
+      - series: 'node_vmstat_pswpout{job="node",instance="gpu04"}'
+        values: '0+100x40'
+    alert_rule_test:
+      - alertname: SwapHeavy
+        eval_time: 14m
+        exp_alerts: []
+      - alertname: SwapHeavy
+        eval_time: 20m
+        exp_alerts:
+          - exp_labels: {alertname: SwapHeavy, severity: warning, job: node, instance: gpu01}
+            exp_annotations:
+              summary: "gpu01 大量使用 swap"
+              description: "gpu01 的 swap 已用 75%，且過去 15 分鐘持續有記憶體被換出到 swap，程式會明顯變慢。記憶體用量最多的是 root（3GiB）。"
+
+  - name: OOMKill
+    interval: 1m
+    input_series:
+      # gpu01：第 10 分鐘有一次 OOM kill
+      - series: 'node_vmstat_oom_kill{job="node",instance="gpu01"}'
+        values: '0x9 1x30'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu01",user="bob"}'
+        values: '53687091200x40'
+      - series: 'lab_user_memory_bytes{job="node",instance="gpu01",user="alice"}'
+        values: '1073741824x40'
+      # gpu02：開機以來累計 3 次，這段時間沒有新的，不告警
+      - series: 'node_vmstat_oom_kill{job="node",instance="gpu02"}'
+        values: '3x40'
+    alert_rule_test:
+      - alertname: OOMKill
+        eval_time: 9m
+        exp_alerts: []
+      - alertname: OOMKill
+        eval_time: 12m
+        exp_alerts:
+          - exp_labels: {alertname: OOMKill, severity: warning, job: node, instance: gpu01}
+            exp_annotations:
+              summary: "gpu01 有程式被 OOM killer 終止"
+              description: "gpu01 過去 15 分鐘內記憶體不足，OOM killer 終止了程式（約 1 次），被終止的是哪個程式可在主機上用 journalctl -k | grep -i oom 查看。目前記憶體用量最多的是 bob（50GiB）。"
+      # 15 分鐘後這次 OOM kill 移出視窗，告警解除
+      - alertname: OOMKill
+        eval_time: 30m
+        exp_alerts: []
+
+  - name: GpuMissing
+    interval: 1m
+    input_series:
+      # gpu01：lspci 8 張、nvidia-smi 只有 7 張
+      - series: 'lab_gpu_pci_count{job="node",instance="gpu01"}'
+        values: '8x60'
+      - series: 'lab_gpu_smi_count{job="node",instance="gpu01"}'
+        values: '7x60'
+      # gpu02：原本 8 張，30 分鐘後掉一張（lspci 也看不到）
+      - series: 'lab_gpu_pci_count{job="node",instance="gpu02"}'
+        values: '8x30 7x30'
+      - series: 'lab_gpu_smi_count{job="node",instance="gpu02"}'
+        values: '8x30 7x30'
+      # gpu03：正常
+      - series: 'lab_gpu_pci_count{job="node",instance="gpu03"}'
+        values: '4x60'
+      - series: 'lab_gpu_smi_count{job="node",instance="gpu03"}'
+        values: '4x60'
+    alert_rule_test:
+      - alertname: GpuMissing
+        eval_time: 5m
+        exp_alerts: []
+      - alertname: GpuMissing
+        eval_time: 50m
+        exp_alerts:
+          - exp_labels: {alertname: GpuMissing, severity: critical, job: node, instance: gpu01}
+            exp_annotations:
+              summary: "gpu01 有 GPU 消失"
+              description: "gpu01 的 nvidia-smi 只看到 7 張 GPU，少於 lspci 數量或過去 7 天的最大值（可能 fallen off the bus，需重開機）。"
+          - exp_labels: {alertname: GpuMissing, severity: critical, job: node, instance: gpu02}
+            exp_annotations:
+              summary: "gpu02 有 GPU 消失"
+              description: "gpu02 的 nvidia-smi 只看到 7 張 GPU，少於 lspci 數量或過去 7 天的最大值（可能 fallen off the bus，需重開機）。"
+
+  - name: MountMissing
+    interval: 1m
+    input_series:
+      # gpu01：三個檔案系統，60 分鐘後 /data1 消失
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu01",mountpoint="/",fstype="ext4"}'
+        values: '1x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu01",mountpoint="/data0",fstype="xfs"}'
+        values: '1x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu01",mountpoint="/data1",fstype="xfs"}'
+        values: '1x60 _x60'
+      - series: 'up{job="node",instance="gpu01"}'
+        values: '1x120'
+      # gpu02：唯一的實體檔案系統消失（count 變成空的；剩下的 tmpfs 不算）
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu02",mountpoint="/data0",fstype="ext4"}'
+        values: '1x60 _x60'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu02",mountpoint="/run",fstype="tmpfs"}'
+        values: '1x120'
+      - series: 'up{job="node",instance="gpu02"}'
+        values: '1x120'
+      # gpu03：只有 tmpfs、NFS、FUSE 掛載消失，不告警
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu03",mountpoint="/",fstype="ext4"}'
+        values: '1x120'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu03",mountpoint="/run/user/1000",fstype="tmpfs"}'
+        values: '1x60 _x60'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu03",mountpoint="/mnt/share",fstype="nfs4"}'
+        values: '1x60 _x60'
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu03",mountpoint="/mnt/sshfs",fstype="fuse.sshfs"}'
+        values: '1x60 _x60'
+      - series: 'up{job="node",instance="gpu03"}'
+        values: '1x120'
+      # gpu04：掛載點跟著主機一起消失（交給 HostDown）
+      - series: 'node_filesystem_size_bytes{job="node",instance="gpu04",mountpoint="/",fstype="ext4"}'
+        values: '1x60 _x60'
+      - series: 'up{job="node",instance="gpu04"}'
+        values: '1x60 0x60'
+    alert_rule_test:
+      - alertname: MountMissing
+        eval_time: 60m
+        exp_alerts: []
+      - alertname: MountMissing
+        eval_time: 90m
+        exp_alerts:
+          - exp_labels: {alertname: MountMissing, severity: critical, instance: gpu01}
+            exp_annotations:
+              summary: "gpu01 有檔案系統掛載不見了"
+              description: "gpu01 目前只有 2 個檔案系統掛載，少於過去 7 天的最大值；資料碟可能沒掛上，使用者可能正在寫入根目錄。"
+          - exp_labels: {alertname: MountMissing, severity: critical, instance: gpu02}
+            exp_annotations:
+              summary: "gpu02 有檔案系統掛載不見了"
+              description: "gpu02 目前只有 0 個檔案系統掛載，少於過去 7 天的最大值；資料碟可能沒掛上，使用者可能正在寫入根目錄。"
+
+  - name: TextfileStale
+    interval: 1m
+    input_series:
+      # gpu.prom 停在 t=0；smart.prom 每分鐘更新；du_home.prom 停在 t=0 但門檻是 2 天
+      - series: 'node_textfile_mtime_seconds{job="node",instance="gpu01",file="/var/lib/node_exporter/textfile/gpu.prom"}'
+        values: '0x20'
+      - series: 'node_textfile_mtime_seconds{job="node",instance="gpu01",file="/var/lib/node_exporter/textfile/smart.prom"}'
+        values: '0+60x20'
+      - series: 'node_textfile_mtime_seconds{job="node",instance="gpu01",file="/var/lib/node_exporter/textfile/du_home.prom"}'
+        values: '0x20'
+    alert_rule_test:
+      - alertname: TextfileStale
+        eval_time: 4m
+        exp_alerts: []
+      - alertname: TextfileStale
+        eval_time: 12m
+        exp_alerts:
+          - exp_labels: {alertname: TextfileStale, severity: warning, job: node, instance: gpu01, file: /var/lib/node_exporter/textfile/gpu.prom}
+            exp_annotations:
+              summary: "gpu01 的 /var/lib/node_exporter/textfile/gpu.prom 沒有更新"
+              description: "gpu01 的 /var/lib/node_exporter/textfile/gpu.prom 已 12m 0s 未更新，對應的收集腳本（systemd timer）可能失敗。"
+
+  - name: TextfileScrapeError
+    interval: 1m
+    input_series:
+      - series: 'node_textfile_scrape_error{job="node",instance="gpu01"}'
+        values: '0x5 1x30'
+      - series: 'node_textfile_scrape_error{job="node",instance="gpu02"}'
+        values: '0x35'
+    alert_rule_test:
+      - alertname: TextfileScrapeError
+        eval_time: 15m
+        exp_alerts: []
+      - alertname: TextfileScrapeError
+        eval_time: 25m
+        exp_alerts:
+          - exp_labels: {alertname: TextfileScrapeError, severity: warning, job: node, instance: gpu01}
+            exp_annotations:
+              summary: "gpu01 的 textfile 指標讀取失敗"
+              description: "gpu01 的 node_exporter 已超過 15 分鐘無法解析 /var/lib/node_exporter/textfile/ 內的某個 .prom 檔（node_exporter 的 log 會寫是哪個檔），該檔的指標（GPU、使用者 CPU／記憶體、磁碟用量或 SMART）沒有更新。"

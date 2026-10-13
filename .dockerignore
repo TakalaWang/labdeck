@@ -1,0 +1,14 @@
+# Build context = the repo root (apps/web/Dockerfile, apps/runner/Dockerfile, deploy/caddy.Dockerfile).
+# Never send deployment secrets or local state into an image build.
+.git
+.env
+.env.*
+secrets
+**/node_modules
+**/.next
+**/*.tsbuildinfo
+e2e/.work
+e2e/test-results
+e2e/playwright-report
+**/__pycache__
+**/.pytest_cache

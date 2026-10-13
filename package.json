@@ -1,0 +1,25 @@
+{
+  "name": "labdeck",
+  "private": true,
+  "description": "LabDeck monorepo: packages/core (shared TS), apps/web (Next.js UI + JSON API), apps/runner (job runner)",
+  "workspaces": [
+    "packages/core",
+    "apps/web",
+    "apps/runner"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc -p packages/core && tsc -p apps/runner && npm run -w @labdeck/web typecheck",
+    "lint": "npm run -w @labdeck/web lint",
+    "test": "vitest run",
+    "build": "npm run -w @labdeck/web build"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3"
+  },
+  "type": "module"
+}

@@ -1,0 +1,22 @@
+route:
+  receiver: discord
+  group_by: [alertname, instance]
+  group_wait: 30s
+  repeat_interval: 12h
+
+receivers:
+  - name: discord
+    discord_configs:
+      - webhook_url_file: /etc/alertmanager/discord_webhook # 需 Alertmanager >= 0.28
+        send_resolved: true
+        title: '{{ if eq .Status "firing" }}[告警]{{ else }}[已解除]{{ end }} {{ .CommonLabels.alertname }}'
+        message: |-
+          {{ range .Alerts }}- {{ .Annotations.summary }}
+            {{ .Annotations.description }}
+          {{ end }}
+
+# 主機整台掛掉時，只通知 HostDown
+inhibit_rules:
+  - source_matchers: [alertname="HostDown"]
+    target_matchers: [alertname!="HostDown"]
+    equal: [instance]

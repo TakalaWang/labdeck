@@ -1,0 +1,44 @@
+#!/bin/sh
+# LabDeck 開發與部署的捷徑（docs/docker.md）。只需要 Docker；每個子指令都只是一行 docker compose。
+#   ./labdeck dev [compose 參數…]    開發環境（compose.dev.yaml）；不加參數 = 建置並啟動，http://localhost:8080
+#                                     例如 ./labdeck dev logs -f web、./labdeck dev down -v
+#   ./labdeck tool <指令…>            在 toolbox 容器（Node 24 + Rust）內執行，例如 ./labdeck tool npm run -w @labdeck/web lint
+#   ./labdeck test                    vitest、cargo test、Prometheus 規則測試
+#   ./labdeck lint                    typecheck、eslint、next build、cargo fmt/clippy、ansible syntax-check、Alertmanager 設定
+#   ./labdeck e2e [playwright 參數…]  端對端測試（e2e/run.sh；KEEP=1、SKIP_BUILD=1）
+#   ./labdeck build                   從原始碼建置正式的三個 image（docker compose build）
+#   ./labdeck prod-up                 正式環境：拉新版 image 並啟動（docker compose pull && docker compose up -d）
+#   ./labdeck logs [服務…]            正式環境的 log（docker compose logs -f）
+set -eu
+cd "$(dirname "$0")"
+
+dev() { docker compose -f compose.dev.yaml "$@"; }
+tool() {
+  if [ -t 0 ] && [ -t 1 ]; then dev run --rm toolbox "$@"; else dev run --rm -T toolbox "$@"; fi
+}
+
+cmd=${1:-help}
+[ $# -eq 0 ] || shift
+case $cmd in
+  dev)
+    if [ $# -gt 0 ]; then dev "$@"; exit; fi
+    dev up -d --build --wait
+    echo "開發環境：http://localhost:8080 （以 dev 登入是管理員）。log：./labdeck dev logs -f web runner；停止：./labdeck dev down"
+    ;;
+  tool) tool "$@" ;;
+  test)
+    tool sh -c 'npm test && cd crates/agent && cargo test --locked'
+    docker run --rm -v "$PWD/deploy/prometheus:/w:ro" -w /w --entrypoint promtool prom/prometheus:v3.15.0 test rules rules_test.yml
+    ;;
+  lint)
+    tool sh -c 'npm run -s typecheck && npm run -s lint && npm run -s build &&
+      cd crates/agent && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings'
+    dev run --rm --no-deps -T --entrypoint sh runner /repo/ansible/syntax-check.sh
+    docker run --rm -v "$PWD/deploy/alertmanager:/w:ro" --entrypoint amtool prom/alertmanager:v0.34.1 check-config /w/alertmanager.yml
+    ;;
+  e2e) exec e2e/run.sh "$@" ;;
+  build) docker compose build "$@" ;;
+  prod-up) docker compose pull && docker compose up -d ;;
+  logs) docker compose logs -f "$@" ;;
+  *) sed -n '2,13s/^# \{0,1\}//p' "$0"; [ "$cmd" = help ] ;;
+esac
