@@ -224,6 +224,10 @@ runner image 不再安裝 pyghmi。
 
 帳號與身分（schema.sql）：`accounts.primary_user`（受管帳號：這台主機的主要使用者，只做顯示）；`accounts.desired` 另有 `absent`
 （網管要求刪除，`remove_home` 是否連家目錄；沒有人認領的舊帳號被刪除時成為 `person_id` 為 NULL 的受管列）。
+移除（api.md）：單台主機的「鎖定」（`desired='locked'`）與「刪除」（`absent`）各排一個只含那一筆的 users job，**一律預覽、由網管確認**；
+保留帳號與 bot 一律拒絕（`validUsername`）。「移除成員」對此人每個主機帳號各做一次鎖定或刪除，並設 `people.removed_at`、`status='locked'`、
+清除 `sso_id` 與通知連結（不刪人員列，就地遷移只加這個欄位）；`status` 改回 `active` 時清除 `removed_at`（`labdeck add-admin` 亦同）。
+「移除」登記（`DELETE /api/admin/requests/{id}`）只刪等待中的那一列，`assignments` 不會指向它（只有指派過的才有）。
 `requests.kind`：`account` = SSO 身分的**登記**（`name`、希望的 `username`、需求）、`hosts` = 既有成員申請其他主機；`requests.decision_note` = 退回原因；兩者都只填需求
 （`reason` 用途、`gpus`、`min_vram_gb`、`expected_end` 預計使用到），不選主機。**沒有自行認領**：SSO 身分一律由網管在待指派連結到既有人員
 或建立新人員（api.md「登記與待指派」）。`assignments`：網管指派的每一個 (人員, 主機) 與它的 `only_user` job（`request_id` 為 NULL = 快速指派）。
@@ -239,7 +243,8 @@ runner image 不再安裝 pyghmi。
 
 `finish` 只更新 `status='running'` 的 job；取消 job 以條件式 `UPDATE … WHERE status IN ('queued','awaiting','confirmed')`。
 
-管理員：`people.role` 只能經 `POST /api/admin/people/{id}/promote` 由 `member` 升為 `admin`（網頁、API 都沒有降級）；
+管理員：網頁上的「移除成員」不能移除自己或最後一位啟用中的管理員（同 `demote-admin` 的規則），也不改 `role`。
+`people.role` 只能經 `POST /api/admin/people/{id}/promote` 由 `member` 升為 `admin`（網頁、API 都沒有降級）；
 降級只能在伺服器上執行 `labdeck demote-admin <帳號>`（`packages/core/src/cli.ts`，web 與 runner image 都有；不會降級最後一位啟用中的管理員）。
 
 `users` entry：`{username, uid, state: present|locked, expires: "YYYY-MM-DD"|null, keys_add: [...], keys_remove: [...]}`。

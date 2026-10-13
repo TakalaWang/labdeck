@@ -130,6 +130,7 @@ Markdown 存在 DB（`pages` 表，key `guide`）；沒有存過時用內建預�
 | DELETE | `/api/admin/hosts/{name}` | admin | `{confirm: "<name>"}` → `{}`；受管帳號須都已取消開通（`desired=locked`）且在主機上已鎖定或不存在，或已刪除（`desired=absent` 且不存在），否則 `409` 並列出帳號；這些帳號列一併刪除 |
 | POST | `/api/admin/hosts/{name}/agents` | admin | → `{job_id}` |
 | POST | `/api/admin/hosts/{name}/collect` | admin | → `{job_id}` |
+| POST | `/api/admin/hosts/{name}/accounts/{username}/lock` | admin | → `{job_id}`；**鎖定這台主機上的帳號**（已認領的受管帳號）：`desired='locked'`、排入只含這一筆的 users job，**一律先預覽、由網管確認**；不刪除任何東西，之後可用人員頁「停用／恢復主機帳號」恢復。保留帳號（`root`、bot、`RESERVED_USERS`）與名稱不合法 `400`；沒有這個帳號 `400`；沒有人認領的帳號 `400`（請先認領或改用刪除）；已刪除的 `400`。稽核 `account_lock` |
 | PUT | `/api/admin/hosts/{name}/accounts/{username}/primary` | admin | `{primary: bool}` → `{primary}`；不是這台主機的受管帳號 `404`；稽核 `primary_set` |
 | POST | `/api/admin/hosts/{name}/accounts/{username}/delete` | admin | `{remove_home: bool, confirm?}` → `{job_id}`；**刪除這台主機上的帳號**（受管帳號，或沒有人認領的舊帳號）：`desired='absent'`、排入只含這一筆的 users job，**一律先預覽、由網管確認**（不自動）。`remove_home: true` 時 `confirm` 須等於帳號名稱（`400`）。保留帳號、名稱不合法 `400`；主機上沒有這個帳號 `400`；UID 與紀錄不符 `400`。稽核 `account_delete`。刪除後（收集到帳號已不在）這一列不再出現在同步裡，同名可再開通 |
 | PUT | `/api/admin/primary-users` | admin | `{items: [{host, username}]}`（**全部主機**主要使用者的完整集合：列出的設為主要，其他全部清除）→ `{items}`（去重、排序）；任何一筆不是受管帳號則 `400` 並列出、全部不變；稽核 `primary_import`（`{count}`）。供一次性匯入，沒有 UI |
@@ -343,6 +344,7 @@ Discord 的 redirect URI = `${PUBLIC_URL}/auth/discord/callback`（Caddy 已把 
 | GET | `/api/admin/requests` | admin | → `[Request]`（待指派在前） |
 | POST | `/api/admin/requests/{id}/assign` | admin | 見下 → `{person_id, jobs: [{host, job_id}]}` |
 | POST | `/api/admin/requests/{id}/reject` | admin | `{reason?}`（選填，最多 500 字）→ `Request`；寄退回通知（含原因）；稽核 `request_reject` |
+| DELETE | `/api/admin/requests/{id}` | admin | → `{}`；**移除**等待中的登記或主機申請：直接刪除這一列，**不通知任何人**（不寄信、不發 Discord，對方也看不到退回紀錄），用於重複、誤送或不認識的人；之後同一身分可再登記（`GET /api/register` 回 `registration: null`）。不存在 `404`、已處理 `409`；稽核 `request_delete`（`{request, kind, sso_id, name?, person_id?}`） |
 | GET | `/api/admin/assign-hosts?person_id=` | admin | → `AssignHosts`（主機挑選用，見下） |
 
 `POST /api/admin/requests/{id}/assign` `{person_id?, username?, hosts: [name]}`（整個請求一個 transaction，任何錯誤全部不變）：
@@ -431,24 +433,38 @@ Prometheus 無法連線時不回 `502`：`metrics_ok=false`，需要即時資料
 
 ## 人員（admin）
 
-`Person` = session.user 欄位 + `{uid, created_at, hosts_count}`
+`Person` = session.user 欄位 + `{uid, created_at, hosts_count, removed_at}`；`removed_at`：「移除成員」的時間（沒有被移除為 `null`），UI 顯示為「已移除」
 
 | 方法 | 路徑 | body → 回應 |
 |---|---|---|
 | GET | `/api/admin/people` | → `[Person]` |
 | GET | `/api/admin/people/{id}` | → `{person: Person, accounts: [同 me.accounts], keys: [同 me.keys], hosts: [{name, group, granted, exists}]}` |
-| PUT | `/api/admin/people/{id}` | `{name, email, sso_id, expires_at, status, role?}` → `Person`；**不能改角色**：`role` 與目前不同一律 `403`（升級用下一列，降級只能用伺服器指令 `labdeck demote-admin`，見 admin-guide.md），相同或省略則忽略；不可鎖定自己（`400`）；稽核 `person_update` |
+| PUT | `/api/admin/people/{id}` | `{name, email, sso_id, expires_at, status, role?}` → `Person`；`status: "active"` 同時清除 `removed_at`（誤移除時恢復）；**不能改角色**：`role` 與目前不同一律 `403`（升級用下一列，降級只能用伺服器指令 `labdeck demote-admin`，見 admin-guide.md），相同或省略則忽略；不可鎖定自己（`400`）；稽核 `person_update` |
 | POST | `/api/admin/people/{id}/promote` | → `Person`；把啟用中、未到期的成員設為管理員；已是管理員直接回傳（冪等，不重複稽核與通知）；鎖定或到期 `400`；不存在 `404`；稽核 `person_promote`、通知網管 Discord（`[管理員] <操作者> 將 <帳號>（<姓名>）設為管理員`） |
 | PUT | `/api/admin/people/{id}/grants` | `{hosts: [name]}`（勾選後的完整集合）→ `{errors: [{host, error}]}`；人員頁「停用／恢復主機帳號」：**只能停用或恢復此人已有的受管帳號**（`desired` present ↔ locked），之後按同步（需預覽）；不在其中的主機列入 `errors`（「尚未開通：新主機請用「指派主機」」），新主機只能用 assign |
 | POST | `/api/admin/people/{id}/assign` | `{hosts: [name]}` → `{jobs: [{host, job_id}]}`；**快速指派**（人員頁、主機頁「新增使用者」）：同待指派的 `assignHosts`，每台一個自動確認的單帳號 job；人員停用或到期 `400`；不寄通知、不改到期日 |
+| POST | `/api/admin/people/{id}/remove` | 見下 → `{person: Person, jobs: [{host, action, job_id}]}`；**移除成員**（畢業、離開） |
 | POST | `/api/admin/people/{id}/sync` | → `{job_id \| null}` |
 | POST | `/api/admin/sync` | → `{job_id \| null}` |
+
+`POST /api/admin/people/{id}/remove` `{hosts: [{host, action: "lock" | "delete", remove_home?, confirm?}]}`（整個請求一個 transaction，任何錯誤全部不變）：
+- `hosts` 必須**恰好**涵蓋此人的每一個主機帳號（受管、且不是已刪除的：`NOT (desired='absent' AND exists_on_host=0)`），每台一筆；
+  缺漏、多出、重複、`action` 不合法 `400`。
+- `lock`：同 `/api/admin/hosts/{name}/accounts/{username}/lock`；帶 `remove_home` `400`。`delete`：同 `…/delete`（主機上沒有這個帳號 `400`；
+  `remove_home: true` 時 `confirm` 須等於帳號名稱）。**每台一個 users job，一律先預覽、由網管確認**，不自動執行。
+- 人員：`status='locked'`、`removed_at` 設為現在；清除 `sso_id`（不能再以成員登入，舊 session 也立即失效）、`discord_id`、`discord_name`、
+  `notify_email`、`notify_prefs`、臨時密碼與待驗證的 Email；佇列中的個人通知標為 `skipped`；此人等待中的登記與主機申請改為 `rejected`
+  （`decision_note`「人員已移除」，不寄信）。人員列保留（`email`、金鑰、帳號與稽核紀錄都在），`GET /api/admin/people` 照常列出。
+  `role` 不變（網頁上沒有降級）；人員已鎖定，所以不會出現在任何人員挑選（連結既有帳號、新增使用者），也不能被指派。
+- 不能移除自己 `400`；不能移除最後一位啟用中的管理員 `400`（同 `labdeck demote-admin` 的規則）；已移除 `409`；不存在 `404`。
+- 稽核 `person_remove`（`{sso_id, closed_requests, hosts: {host: "lock"|"delete"|"delete_home"}, jobs}`），另有各台的 `account_lock`／`account_delete`；
+  網管頻道 `[移除成員] <操作者> 移除了 <帳號>（<姓名>）：gpu01 刪除（含家目錄）、gpu02 鎖定；2 個預覽工作待確認`。
 
 ## 工作（admin）
 
 `Job`：`{id, kind, target_hosts: [name], status, actor, created_at, run_at, finished_at, auto_confirm, summary, scoped}`（`target_hosts: []` = 全部主機，
 即排程每日收集的 `"all"`；`args.target_hosts` 保留原值）；`summary` 是給人看的描述（`describeJob`，packages/core：「指派 xiaoming @gpu01」、
-「刪除 oldgrad @gpu01」、「金鑰部署 alice @gpu01」、「帳號同步 …」、「收集資料（全部主機）」、「安裝監控 @gpu01」），網管頻道的通知用同一句；
+「刪除 oldgrad @gpu01」、「鎖定 oldgrad @gpu01」、「金鑰部署 alice @gpu01」、「帳號同步 …」、「收集資料（全部主機）」、「安裝監控 @gpu01」），網管頻道的通知用同一句；
 `scoped`：管理員指派的單帳號 job（`only_user`）。
 `JobDetail` = `Job` + `{args, check_output, output, failure}`；`failure`：失敗（`failed`、`check_failed`）時的一句白話摘要（`failureSummary`：
 無法連線／host key 未知／金鑰被拒 →「主機尚未 bootstrap 或無法連線」、sudo 密碼不符、Permission denied、VPN 中斷、狀態已變更），否則 `null`。
