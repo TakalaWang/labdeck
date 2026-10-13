@@ -15,8 +15,10 @@ VOLS="portal_data prom_sd prometheus_data alertmanager_data caddy_data"
 
 echo "== 1/6 deployment files ($REF) → $NEW"
 mkdir -p "$NEW"
-curl -fsSL "https://github.com/TakalaWang/labdeck/archive/$REF.tar.gz" \
-  | tar xz -C "$NEW" --strip-components=1 --wildcards '*/compose.yaml' '*/deploy'
+TMP=$(mktemp -d)
+curl -fsSL "https://github.com/TakalaWang/labdeck/archive/$REF.tar.gz" | tar xz -C "$TMP" --strip-components=1
+cp -p "$TMP/compose.yaml" "$NEW/" && cp -Rp "$TMP/deploy" "$NEW/"
+rm -rf "$TMP"
 cp -p "$OLD/.env" "$NEW/.env"
 cp -a "$OLD/secrets" "$NEW/secrets"
 grep -q '^LABDECK_VERSION=' "$NEW/.env" || echo "LABDECK_VERSION=$REF" >> "$NEW/.env"
@@ -33,7 +35,8 @@ echo "== 4/6 stop lab-dashboard, copy its volumes to labdeck_*"
 docker compose -p lab-dashboard down
 docker compose up --no-start caddy web runner prometheus alertmanager
 for v in $VOLS; do
-  docker run --rm -v "lab-dashboard_$v":/from:ro -v "labdeck_$v":/to alpine sh -c 'cp -a /from/. /to/'
+  # cp -a keeps the contents' owners; the volume root needs its owner too (prometheus/alertmanager run as nobody)
+  docker run --rm -v "lab-dashboard_$v":/from:ro -v "labdeck_$v":/to alpine sh -c 'cp -a /from/. /to/ && chown "$(stat -c %u:%g /from)" /to'
 done
 
 echo "== 5/6 start (without the runner)"
