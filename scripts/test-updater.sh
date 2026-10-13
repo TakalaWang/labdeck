@@ -46,7 +46,8 @@ ARG V OK MIGRATE
 ENV MIGRATE=$MIGRATE
 LABEL org.opencontainers.image.version=main org.opencontainers.image.revision=rev${V}aaaaaaaa
 RUN mkdir -p /www/api && if [ "$OK" = 1 ]; then echo "v$V" >/www/api/session; fi
-CMD ["sh", "-c", "[ \"$MIGRATE\" != 1 ] || echo 'backed up the DB to /data/backup/pre-migrate-x.db before migrating it'; exec httpd -f -p 3000 -h /www"]
+# the migration message comes a few seconds after start, like a real migration: catches an updater that looks too early
+CMD ["sh", "-c", "[ \"$MIGRATE\" != 1 ] || (sleep 5; echo 'backed up the DB to /data/backup/pre-migrate-x.db before migrating it') & exec httpd -f -p 3000 -h /www"]
 EOF
   docker push -q "$PREFIX-web:main" >/dev/null
 }

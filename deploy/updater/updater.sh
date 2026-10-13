@@ -139,12 +139,22 @@ log "更新：$(versions)"
 # shellcheck disable=SC2086
 dc up -d --no-deps --pull never $changed
 
-migrated=
-for s in $changed; do
-  if docker logs "$(cid "$s")" 2>&1 | grep -q "$MIGRATION_MARK"; then migrated="$migrated $s"; fi
-done
+# The plan records what actually started (a manual pull between our pull and up could have moved the tag),
+# so the bad list and the rollback refer to the image that ran.
+while read -r s r o _; do echo "$s $r $o $(docker inspect -f '{{.Image}}' "$(cid "$s")")"; done <"$plan" >"$plan.run"
+mv "$plan.run" "$plan"
+
+# A migration is detected only after the health wait: right after `up` the new container may not have logged it
+# yet, and missing it would wrongly allow an automatic rollback onto a DB the old version can't open (fail closed).
+did_migrate() {
+  migrated=
+  for s in $changed; do
+    if docker logs "$(cid "$s")" 2>&1 | grep -q "$MIGRATION_MARK"; then migrated="$migrated $s"; fi
+  done
+}
 
 if wait_healthy; then
+  did_migrate
   msg="更新完成：$(versions)"
   [ -z "$migrated" ] || msg="$msg。DB 已遷移，遷移前的備份在 portal_data 的 /data/backup/pre-migrate-*.db"
   notify "$msg"
@@ -154,6 +164,7 @@ fi
 
 failed=$(versions)
 describe
+did_migrate
 while read -r _ _ _ n; do echo "$n" >>"$STATE/bad"; done <"$plan"
 if [ -n "$migrated" ]; then
   # 舊版看到新的表結構會拒絕啟動（它要刪掉新欄位），所以不自動回復
