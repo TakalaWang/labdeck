@@ -75,6 +75,16 @@ runner 與 cli 不再掛載 repo：playbook 改為建置進 runner image（`/rep
 
 ## 從 lab-dashboard 升級
 
+最簡單的方式是在監控主機上以 root 執行搬遷腳本（只需要 Docker 與 curl；不啟動 runner，舊 volume 保留可回復）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TakalaWang/labdeck/main/scripts/migrate-from-lab-dashboard.sh | sh -s -- /舊的/repo 目錄 /opt/labdeck
+```
+
+它會下載 `compose.yaml` 與 `deploy/`、複製舊的 `.env` 與 `secrets/`、拉 image、線上備份資料庫、把 `lab-dashboard_*` volume
+複製成 `labdeck_*` 並啟動（不含 runner），最後替監控主機自己放行 node_exporter。確認網站正常後再 `docker compose up -d runner`。
+以下是腳本做的事的手動版本：
+
 專案改名為 LabDeck：compose 專案名稱由 `lab-dashboard` 改為 `labdeck`，named volume 因此變成 `labdeck_*`（舊的是 `lab-dashboard_*`），
 image 改為 `labdeck-api:local`、`labdeck-web:local`；目錄也重新整理（`apps/`、`ansible/`、`deploy/`），但 `.env` 與 `secrets/` 仍在 repo 根目錄、不用改。
 直接 `docker compose up` 會得到一組空的 volume（新的 DB、沒有歷史資料），請先把舊 volume 複製過去：
