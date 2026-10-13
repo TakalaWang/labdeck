@@ -573,6 +573,21 @@ export interface Person extends User {
   uid: number | null
   created_at: ISODateTime
   hosts_count: number
+  /** 移除成員: when an admin removed (offboarded) this person; null = not removed */
+  removed_at: ISODateTime | null
+}
+
+/** 移除成員: one choice per host account (POST /api/admin/people/{id}/remove). */
+export interface RemoveHostChoice {
+  host: string
+  action: 'lock' | 'delete'
+  remove_home: boolean
+  confirm: string
+}
+
+export interface RemovePersonResult {
+  person: Person
+  jobs: { host: string; action: 'lock' | 'delete'; job_id: number }[]
 }
 
 export interface PersonDetail {

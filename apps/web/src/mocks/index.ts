@@ -391,10 +391,18 @@ function route(method: string, url: URL, body: Record<string, unknown> | undefin
     return ok({ adopted, errors })
   }
   if (p === '/api/admin/people') return ok(d.people)
-  m = p.match(/^\/api\/admin\/people\/(\d+)(?:\/(grants|sync|promote))?$/)
+  m = p.match(/^\/api\/admin\/people\/(\d+)(?:\/(grants|sync|promote|remove))?$/)
   if (m) {
     const person = d.people.find((x) => x.id === Number(m![1]))
     if (!person) return err(404, '找不到人員')
+    if (m[2] === 'remove') {
+      // api.md 移除成員: one previewed job per host account; links cleared; not oneself
+      if (person.id === me().id) return err(400, '不能移除自己')
+      const choices = (body?.hosts as { host: string; action: 'lock' | 'delete' }[]) ?? []
+      const jobs = choices.map((c) => ({ host: c.host, action: c.action, job_id: newJob('users', [c.host], { status: 'awaiting', auto_confirm: false }) }))
+      Object.assign(person, { status: 'locked', sso_id: null, removed_at: new Date().toISOString() })
+      return ok({ person, jobs })
+    }
     if (m[2] === 'sync') return ok({ job_id: newJob('users', d.myAccounts(person.username).map((a) => a.host)) })
     if (m[2] === 'grants') return ok({ errors: (body?.hosts as string[]).includes('gpu04') ? [{ host: 'gpu04', error: '主機離線，稍後同步時再套用' }] : [] })
     if (m[2] === 'promote') {
@@ -420,6 +428,14 @@ function route(method: string, url: URL, body: Record<string, unknown> | undefin
   }
   if (p === '/api/admin/sync' && method === 'POST') return ok({ job_id: newJob('users', d.hosts.map((h) => h.name)) })
   if (p === '/api/admin/requests') return ok([...d.requests].sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending')))
+  m = p.match(/^\/api\/admin\/requests\/(\d+)$/)
+  if (m && method === 'DELETE') {
+    // 移除: deleted silently, no notification
+    const i = d.requests.findIndex((x) => x.id === Number(m![1]) && x.status === 'pending')
+    if (i < 0) return err(409, '申請已處理')
+    d.requests.splice(i, 1)
+    return ok({})
+  }
   m = p.match(/^\/api\/admin\/requests\/(\d+)\/(assign|reject)$/)
   if (m && method === 'POST') {
     const req = d.requests.find((x) => x.id === Number(m![1]))
@@ -475,6 +491,8 @@ function route(method: string, url: URL, body: Record<string, unknown> | undefin
     if (!hosts.length) return err(400, '請選擇主機')
     return ok({ jobs: hosts.map((h) => ({ host: h, job_id: newJob('users', [h]) })) })
   }
+  m = p.match(/^\/api\/admin\/hosts\/([^/]+)\/accounts\/([^/]+)\/lock$/)
+  if (m && method === 'POST') return ok({ job_id: newJob('users', [decodeURIComponent(m[1])], { status: 'awaiting', auto_confirm: false }) })
   m = p.match(/^\/api\/admin\/hosts\/([^/]+)\/accounts\/([^/]+)\/delete$/)
   if (m && method === 'POST') {
     if (body?.remove_home && String(body?.confirm ?? '').trim() !== decodeURIComponent(m[2])) return err(400, `確認文字不符：刪除家目錄請輸入 ${decodeURIComponent(m[2])}`)

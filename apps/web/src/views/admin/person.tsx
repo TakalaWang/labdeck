@@ -4,10 +4,11 @@ import { useId, useState, type FormEvent } from 'react'
 import { Link, useParams } from '@/lib/router'
 import { toast } from 'sonner'
 
-import { DeleteAccountDialog } from '@/components/account-admin'
+import { RemoveAccountMenu } from '@/components/account-admin'
 import { AssignHostPicker } from '@/components/assign-hosts'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader, Section, TableWrap } from '@/components/page'
+import { RemovePersonDialog } from '@/components/remove-person'
 import { QueryState, SkeletonRows } from '@/components/states'
 import { Pill } from '@/components/status'
 import { Button } from '@/components/ui/button'
@@ -19,7 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { useJobToast } from '@/hooks/use-job-toast'
 import { api } from '@/lib/api'
 import { daysUntil, fmtDate, fmtDateTime, fmtRelative } from '@/lib/format'
-import { DESIRED_LABEL, PERSON_STATUS_LABEL, ROLE_LABEL } from '@/lib/labels'
+import { DESIRED_LABEL, ROLE_LABEL, personStatus } from '@/lib/labels'
 import { useAccess } from '@/lib/session'
 import type { AssignResult, JobIdMaybe, Person, PersonDetail, PersonInput, PersonStatus } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -103,7 +104,7 @@ export function PromoteButton({ p }: { p: Person }) {
       void qc.invalidateQueries({ queryKey: ['people'] })
     },
   })
-  if (p.role === 'admin') return null
+  if (p.role === 'admin' || p.removed_at) return null
   const days = daysUntil(p.expires_at)
   const blocked = p.status !== 'active' ? '已鎖定' : days !== null && days < 0 ? '已到期' : null
   const who = p.name ? `${p.name}（${p.username}）` : p.username
@@ -300,7 +301,7 @@ export default function AdminPerson() {
             description={
               <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span>UID {d.person.uid ?? '未定'}</span>
-                <Pill tone={d.person.status === 'active' ? 'ok' : 'muted'}>{PERSON_STATUS_LABEL[d.person.status]}</Pill>
+                <Pill tone={personStatus(d.person).tone}>{personStatus(d.person).label}</Pill>
                 <Pill tone={d.person.role === 'admin' ? 'info' : 'muted'}>{ROLE_LABEL[d.person.role]}</Pill>
                 <span>建立於 {fmtDate(d.person.created_at)}</span>
               </span>
@@ -311,9 +312,16 @@ export default function AdminPerson() {
                   <Link to="/admin/people">← 人員列表</Link>
                 </Button>
                 <PromoteButton p={d.person} />
+                <RemovePersonDialog p={d.person} />
               </>
             }
           />
+          {d.person.removed_at && (
+            <p className="mb-6 rounded-lg border bg-muted/40 px-4 py-3 text-sm" data-testid="removed-banner">
+              已於 {fmtDate(d.person.removed_at)} 移除：SSO 身分與通知連結已清除，無法以成員登入；紀錄保留供查詢。
+              主機帳號的鎖定或刪除見下方「主機帳號」與工作頁。誤移除時把狀態改回「啟用」並重新填入 {a.oauthName} ID。
+            </p>
+          )}
           <Section title="基本資料">
             <EditForm key={d.person.id} p={d.person} oauthName={a.oauthName} isSelf={a.user?.id === d.person.id} />
           </Section>
@@ -356,7 +364,7 @@ export default function AdminPerson() {
               </TableWrap>
             )}
           </Section>
-          <Section title="主機帳號">
+          <Section title="主機帳號" description="每一列的「移除」：鎖定（停止登入、保留檔案）或刪除這台主機上的帳號，都會先產生預覽工作。">
             {d.accounts.length === 0 ? (
               <p className="text-sm text-muted-foreground">尚未開通任何主機。</p>
             ) : (
@@ -370,8 +378,8 @@ export default function AdminPerson() {
                       <TableHead>期望</TableHead>
                       <TableHead>主機上的到期日</TableHead>
                       <TableHead>最後活動</TableHead>
-                      <TableHead className="w-10">
-                        <span className="sr-only">刪除</span>
+                      <TableHead className="w-20">
+                        <span className="sr-only">移除</span>
                       </TableHead>
                     </TableRow>
                   </TableHeader>
@@ -388,11 +396,14 @@ export default function AdminPerson() {
                         <TableCell>{DESIRED_LABEL[ac.desired]}</TableCell>
                         <TableCell>{fmtDate(ac.expires)}</TableCell>
                         <TableCell title={fmtDateTime(ac.last_active)}>{fmtRelative(ac.last_active)}</TableCell>
-                        <TableCell>
-                          {ac.exists && ac.desired !== 'absent' && (
-                            <DeleteAccountDialog
+                        <TableCell className="text-right">
+                          {ac.desired !== 'absent' && (
+                            <RemoveAccountMenu
                               host={ac.host}
                               username={ac.username}
+                              claimed
+                              exists={ac.exists}
+                              desired={ac.desired}
                               onDone={() => void q.refetch()}
                             />
                           )}

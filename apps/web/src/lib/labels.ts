@@ -46,6 +46,7 @@ export function requestStatus(r: { status: RequestStatus; hosts: string[] }): { 
 /** Audit action codes in words (the code stays in a tooltip). Unknown codes (older versions) show as they are. */
 export const AUDIT_ACTION: Record<string, string> = {
   account_delete: '刪除主機帳號',
+  account_lock: '鎖定主機帳號',
   add_admin: '新增管理員（伺服器指令）',
   admin_demote: '移除管理員（伺服器指令）',
   adopt: '認領帳號',
@@ -72,12 +73,14 @@ export const AUDIT_ACTION: Record<string, string> = {
   notify_prefs: '變更通知設定',
   person_create: '建立人員',
   person_promote: '設為管理員',
+  person_remove: '移除成員',
   person_update: '編輯人員',
   primary_import: '匯入主要使用者',
   primary_set: '設定主要使用者',
   register: '登記',
   register_update: '修改登記',
   request_assign: '指派',
+  request_delete: '移除登記',
   request_reject: '退回',
   sso_link: '連結 SSO 身分',
   temp_password_ack: '已記下臨時密碼',
@@ -107,6 +110,12 @@ export const HEALTH_STATUS: Record<HealthStatus, { label: string; tone: Tone }> 
 
 export const ROLE_LABEL = { admin: '管理員', member: '成員' } as const
 export const PERSON_STATUS_LABEL = { active: '啟用', locked: '鎖定' } as const
+
+/** A person's status badge: a removed (offboarded) person is 已移除, whatever the stored status. */
+export function personStatus(p: { status: 'active' | 'locked'; removed_at: string | null }): { label: string; tone: Tone } {
+  if (p.removed_at) return { label: '已移除', tone: 'muted' }
+  return p.status === 'active' ? { label: PERSON_STATUS_LABEL.active, tone: 'ok' } : { label: PERSON_STATUS_LABEL.locked, tone: 'muted' }
+}
 
 /** Usage level → tone for resource bars (CPU/MEM/disk). */
 export function levelTone(pct: number | null | undefined): Tone {

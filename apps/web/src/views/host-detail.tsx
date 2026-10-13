@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from '@/lib/router'
 import { toast } from 'sonner'
 
-import { AddUserToHost, DeleteAccountDialog } from '@/components/account-admin'
+import { AddUserToHost, RemoveAccountMenu } from '@/components/account-admin'
 import { TimeSeriesChart, type Series } from '@/components/charts'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CopyBlock } from '@/components/copy-button'
@@ -250,12 +250,17 @@ function AccountsSection({ host, isAdmin }: { host: HostDetailT; isAdmin: boolea
   const others = accounts
     .filter((a) => !a.primary)
     .sort((x, y) => (y.last_active ?? '').localeCompare(x.last_active ?? '') || x.username.localeCompare(y.username))
+  // 移除 (鎖定／刪除): never reserved accounts or the bot; nothing left to do for one already deleted
+  const canRemove = (a: HostAccount) => !a.reserved && !(a.desired === 'absent') && (a.exists || (a.managed && !!a.person))
+  const removeProps = (a: HostAccount) => ({
+    host: host.name, username: a.username, claimed: a.managed && !!a.person, exists: a.exists, desired: a.desired, onDone: refresh,
+  })
   const gpuText = (u: string) => (gpu.data ? (hours.has(u) ? `${fmtNum(hours.get(u), 1)} h` : '—') : '—')
   return (
     <Section
       id="accounts"
       title={`使用者（${accounts.length}）`}
-      description={`狀態：${ACCOUNT_IDLE_DAYS} 天以上沒有登入或活動為「閒置」。${isAdmin ? '按星號設定主要使用者。' : ''}`}
+      description={`狀態：${ACCOUNT_IDLE_DAYS} 天以上沒有登入或活動為「閒置」。${isAdmin ? '按星號設定主要使用者；「移除」可鎖定或刪除這台主機上的帳號（先預覽、再確認）。' : ''}`}
       actions={isAdmin ? <AddUserToHost host={host.name} existing={assigned} onDone={refresh} /> : undefined}
     >
       {accounts.length === 0 ? (
@@ -286,7 +291,12 @@ function AccountsSection({ host, isAdmin }: { host: HostDetailT; isAdmin: boolea
                         {host.monitored && <span>· GPU {gpuText(a.username)}</span>}
                       </p>
                     </div>
-                    {isAdmin && <PrimaryStar host={host.name} a={a} />}
+                    {isAdmin && (
+                      <div className="flex shrink-0 items-center">
+                        <PrimaryStar host={host.name} a={a} />
+                        {canRemove(a) && <RemoveAccountMenu {...removeProps(a)} />}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -308,8 +318,8 @@ function AccountsSection({ host, isAdmin }: { host: HostDetailT; isAdmin: boolea
                     {host.monitored && <TableHead className="text-right">近 30 天 GPU 用量</TableHead>}
                     <TableHead>狀態</TableHead>
                     {isAdmin && (
-                      <TableHead className="w-10">
-                        <span className="sr-only">刪除</span>
+                      <TableHead className="w-20">
+                        <span className="sr-only">移除</span>
                       </TableHead>
                     )}
                   </TableRow>
@@ -334,9 +344,7 @@ function AccountsSection({ host, isAdmin }: { host: HostDetailT; isAdmin: boolea
                       {host.monitored && <TableCell className="num text-right">{gpuText(ac.username)}</TableCell>}
                       <TableCell>{accountState(ac, isAdmin)}</TableCell>
                       {isAdmin && (
-                        <TableCell>
-                          {ac.exists && ac.desired !== 'absent' && !ac.reserved && <DeleteAccountDialog host={host.name} username={ac.username} onDone={refresh} />}
-                        </TableCell>
+                        <TableCell className="text-right">{canRemove(ac) && <RemoveAccountMenu {...removeProps(ac)} />}</TableCell>
                       )}
                     </TableRow>
                   ))}

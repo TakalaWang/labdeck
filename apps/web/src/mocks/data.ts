@@ -61,12 +61,14 @@ const dateIn = (d: number) => iso(now() + d * 86400000).slice(0, 10)
 export const USERS = ['alice', 'bob', 'carol'] as const
 
 export const people: Person[] = [
-  { id: 1, username: 'alice', name: 'Alice', email: 'alice@example.org', sso_id: 'alice01', role: 'admin', status: 'active', expires_at: dateIn(640), uid: 20001, created_at: daysAgo(400), hosts_count: 4 },
-  { id: 2, username: 'bob', name: 'Bob', email: 'bob@example.org', sso_id: 'bob02', role: 'member', status: 'active', expires_at: dateIn(210), uid: 20002, created_at: daysAgo(300), hosts_count: 3 },
-  { id: 3, username: 'carol', name: 'Carol', email: 'carol@example.org', sso_id: 'carol03', role: 'member', status: 'active', expires_at: dateIn(12), uid: 20003, created_at: daysAgo(90), hosts_count: 2 },
+  { id: 1, username: 'alice', name: 'Alice', email: 'alice@example.org', sso_id: 'alice01', role: 'admin', status: 'active', expires_at: dateIn(640), uid: 20001, created_at: daysAgo(400), hosts_count: 4, removed_at: null },
+  { id: 2, username: 'bob', name: 'Bob', email: 'bob@example.org', sso_id: 'bob02', role: 'member', status: 'active', expires_at: dateIn(210), uid: 20002, created_at: daysAgo(300), hosts_count: 3, removed_at: null },
+  { id: 3, username: 'carol', name: 'Carol', email: 'carol@example.org', sso_id: 'carol03', role: 'member', status: 'active', expires_at: dateIn(12), uid: 20003, created_at: daysAgo(90), hosts_count: 2, removed_at: null },
   // adopted from host accounts, no SSO ID yet: a registration can be linked to them
-  { id: 6, username: 'dchen', name: null, email: null, sso_id: null, role: 'member', status: 'active', expires_at: null, uid: 1004, created_at: daysAgo(30), hosts_count: 2 },
-  { id: 7, username: 'kevin', name: null, email: null, sso_id: null, role: 'member', status: 'active', expires_at: null, uid: null, created_at: daysAgo(30), hosts_count: 1 },
+  { id: 6, username: 'dchen', name: null, email: null, sso_id: null, role: 'member', status: 'active', expires_at: null, uid: 1004, created_at: daysAgo(30), hosts_count: 2, removed_at: null },
+  { id: 7, username: 'kevin', name: null, email: null, sso_id: null, role: 'member', status: 'active', expires_at: null, uid: null, created_at: daysAgo(30), hosts_count: 1, removed_at: null },
+  // 移除成員: offboarded, kept for history (人員 → 已移除)
+  { id: 8, username: 'oldgrad', name: 'Old Grad', email: 'oldgrad@example.org', sso_id: null, role: 'member', status: 'locked', expires_at: null, uid: 20008, created_at: daysAgo(900), hosts_count: 0, removed_at: daysAgo(20) },
 ]
 
 type HostSpec = {

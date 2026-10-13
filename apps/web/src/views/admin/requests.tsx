@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Inbox, UserCheck } from 'lucide-react'
+import { Inbox, Trash2, UserCheck } from 'lucide-react'
 import { useId, useState } from 'react'
 import { Link } from '@/lib/router'
 import { toast } from 'sonner'
@@ -22,7 +22,7 @@ import { useAccess } from '@/lib/session'
 import type { AccountRequest, AssignInput, AssignResult, Person } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
-const noSso = (p: Person) => !p.sso_id && p.status === 'active'
+const noSso = (p: Person) => !p.sso_id && p.status === 'active' && !p.removed_at
 
 /** Link or create the person (registrations), pick hosts, confirm: one scoped job per host, no preview. */
 function AssignPanel({ r, onClose }: { r: AccountRequest; onClose: () => void }) {
@@ -150,8 +150,16 @@ function RequestCard({ r }: { r: AccountRequest }) {
       void qc.invalidateQueries({ queryKey: ['admin-requests'] })
     },
   })
+  const remove = useMutation({
+    mutationFn: () => api.del<object>(`/api/admin/requests/${r.id}`),
+    onSuccess: () => {
+      toast.success(`已移除 ${r.name ?? r.username} 的${r.kind === 'hosts' ? '主機申請' : '登記'}（未通知對方）`)
+      void qc.invalidateQueries({ queryKey: ['admin-requests'] })
+    },
+  })
   const s = requestStatus(r)
   const member = r.kind === 'hosts'
+  const what = member ? '主機申請' : '登記'
   return (
     <li className="rounded-lg border bg-card p-4" data-testid={`request-${r.id}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -174,11 +182,27 @@ function RequestCard({ r }: { r: AccountRequest }) {
           </p>
         </div>
         {r.status === 'pending' ? (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <ConfirmDialog
-              trigger={<Button variant="outline" size="sm">退回</Button>}
-              title={`退回 ${r.name ?? r.username} 的${member ? '主機申請' : '登記'}？`}
-              description="對方會在網頁上看到「已退回」與原因，並收到退回通知信（有設定 Email 時）；可以修改後重新送出。"
+              trigger={
+                <Button variant="ghost" size="sm" className="text-muted-foreground" title="不通知對方，直接刪除這筆（重複、誤送、不認識的人）">
+                  <Trash2 /> 移除
+                </Button>
+              }
+              title={`移除 ${r.name ?? r.username} 的${what}？`}
+              description={
+                <div className="grid gap-2">
+                  <p>直接刪除這筆{what}，<strong className="font-medium text-foreground">不會通知對方</strong>（不寄信、不發 Discord），對方網頁上也不會看到退回紀錄。</p>
+                  <p>適用於重複送出、誤送或不認識的人。對方之後仍可以重新{member ? '申請' : '登記'}。要讓對方知道原因請改用「退回」。</p>
+                </div>
+              }
+              confirmLabel="移除"
+              onConfirm={() => remove.mutateAsync()}
+            />
+            <ConfirmDialog
+              trigger={<Button variant="outline" size="sm" title="通知對方（可附原因），對方可修改後重新送出">退回</Button>}
+              title={`退回 ${r.name ?? r.username} 的${what}？`}
+              description="對方會在網頁上看到「已退回」與原因，並收到退回通知信（有設定 Email 時）；可以修改後重新送出。不想通知對方時改用「移除」。"
               confirmLabel="退回"
               onConfirm={() => reject.mutateAsync()}
             >
@@ -273,7 +297,7 @@ export default function AdminRequests() {
     <>
       <PageHeader
         title="待指派"
-        description="新成員登記與既有成員的主機申請。建立或連結帳號、挑選主機後，每台主機排一個只動這個帳號的工作（不需預覽）。指派不寄信，請自行告知對方；登記的「預計使用到」只供參考，帳號到期日在人員頁設定。"
+        description="新成員登記與既有成員的主機申請。建立或連結帳號、挑選主機後，每台主機排一個只動這個帳號的工作（不需預覽）。指派不寄信，請自行告知對方；登記的「預計使用到」只供參考，帳號到期日在人員頁設定。不處理的：「退回」會通知對方並附原因，「移除」直接刪除、不通知（重複、誤送、不認識的人）。"
       />
       <QueryState query={q} skeleton={<SkeletonRows rows={5} />}>
         {(rows) => {
