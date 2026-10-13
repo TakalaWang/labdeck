@@ -6,6 +6,7 @@
 #   ./labdeck test                    vitest、cargo test、Prometheus 規則測試
 #   ./labdeck lint                    typecheck、eslint、next build、cargo fmt/clippy、ansible syntax-check、Alertmanager 設定
 #   ./labdeck e2e [playwright 參數…]  端對端測試（e2e/run.sh；KEEP=1、SKIP_BUILD=1）
+#   ./labdeck test-updater            自動更新（deploy/updater/）的測試：本機 registry + 拋棄式 compose 專案（KEEP=1）
 #   ./labdeck build                   從原始碼建置正式的三個 image（docker compose build）
 #   ./labdeck prod-up                 正式環境：拉新版 image 並啟動（docker compose pull && docker compose up -d）
 #   ./labdeck logs [服務…]            正式環境的 log（docker compose logs -f）
@@ -37,8 +38,9 @@ case $cmd in
     docker run --rm -v "$PWD/deploy/alertmanager:/w:ro" --entrypoint amtool prom/alertmanager:v0.34.1 check-config /w/alertmanager.yml
     ;;
   e2e) exec e2e/run.sh "$@" ;;
+  test-updater) exec scripts/test-updater.sh ;;
   build) docker compose build "$@" ;;
   prod-up) docker compose pull && docker compose up -d ;;
   logs) docker compose logs -f "$@" ;;
-  *) sed -n '2,13s/^# \{0,1\}//p' "$0"; [ "$cmd" = help ] ;;
+  *) sed -n '2,14s/^# \{0,1\}//p' "$0"; [ "$cmd" = help ] ;;
 esac

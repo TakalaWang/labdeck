@@ -22,6 +22,7 @@ repo 根目錄的小腳本（POSIX sh，只呼叫 docker），每個子指令都
 | `./labdeck test` | vitest、`cargo test`、Prometheus 規則測試 |
 | `./labdeck lint` | typecheck、eslint、`next build`、`cargo fmt --check`、clippy、ansible syntax-check、Alertmanager 設定檢查 |
 | `./labdeck e2e [playwright 參數]` | 端對端測試（= `e2e/run.sh`） |
+| `./labdeck test-updater` | 自動更新（`deploy/updater/`）的測試：本機 registry + 拋棄式 compose 專案（= `scripts/test-updater.sh`，`KEEP=1` 不拆） |
 | `./labdeck build` | 從原始碼建置正式的三個 image（= `docker compose build`） |
 | `./labdeck prod-up` | 正式環境：`docker compose pull && docker compose up -d` |
 | `./labdeck logs [服務]` | 正式環境的 log（`docker compose logs -f`） |
@@ -36,6 +37,8 @@ repo 根目錄的小腳本（POSIX sh，只呼叫 docker），每個子指令都
   以及 `latest`（最新的正式版 tag）。
 - `.env` 的 `LABDECK_IMAGE_PREFIX`（預設 `ghcr.io/takalawang/labdeck`）與 `LABDECK_VERSION`（預設 `latest`）決定用哪個 image；
   建議固定成某個版本，升級時改版本號再 `docker compose pull && docker compose up -d`。
+- 自動更新（選用）：compose 的 `updater` 服務（profile `autoupdate`）以官方 `docker:*-cli` image 執行從部署目錄掛入的
+  `deploy/updater/updater.sh`，定時拉 `LABDECK_VERSION` 的新 image、健康檢查失敗自動回復，不需要另外的 image。見 [deploy.md](deploy.md#自動更新cd)。
 - 從原始碼建置：在 checkout 內把 `.env` 設成 `LABDECK_IMAGE_PREFIX=labdeck`、`LABDECK_VERSION=local`，再 `docker compose build`（`./labdeck build`）。
   建置時需要連得到 npm、PyPI、crates.io 與 Docker Hub；runner image 內的 labdeck-agent（Rust）只在建置時需要 crates.io，執行時不用。
   不改這兩個變數直接建置，image 會用 GHCR 的名稱，之後的 `docker compose pull` 會把它換掉。
@@ -80,6 +83,7 @@ repo 根目錄的小腳本（POSIX sh，只呼叫 docker），每個子指令都
 ./labdeck test     # vitest（core、API route handler、runner）、cargo test、promtool test rules
 ./labdeck lint     # 型別、eslint、next build、cargo fmt/clippy、ansible syntax-check、amtool check-config
 ./labdeck e2e      # 端對端（約 5–10 分鐘）
+./labdeck test-updater   # 自動更新：v1→v2、停著的服務不動、壞版本回復且不重試（約 3 分鐘）
 ```
 
 toolbox 的 `node_modules`、`.next` 與 cargo 的快取與編譯結果放在 volume（`labdeck-dev_node_modules` 等），不會寫進工作目錄，
