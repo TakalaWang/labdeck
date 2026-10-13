@@ -120,6 +120,25 @@ services:
     depends_on: [caddy]
     networks: [lab]
 
+  # 自動更新（docs/deploy.md「自動更新（CD）」）：預設不啟動，.env 加 COMPOSE_PROFILES=autoupdate 後 docker compose up -d。
+  # 每 LABDECK_UPDATE_INTERVAL 秒拉 LABDECK_VERSION 的新 image，只更新正在跑的服務，健康檢查失敗就換回舊 image。
+  # 持有 Docker socket（等同主機 root）；腳本是 deploy/updater/updater.sh，不隨 image 更新
+  updater:
+    image: docker:28.5.2-cli
+    profiles: [autoupdate]
+    restart: unless-stopped
+    entrypoint: [sh, /deploy/deploy/updater/updater.sh]
+    environment:
+      TZ: ${TZ:-UTC}
+      LABDECK_UPDATE_INTERVAL: ${LABDECK_UPDATE_INTERVAL:-600}
+      LABDECK_UPDATE_TIMEOUT: ${LABDECK_UPDATE_TIMEOUT:-180}
+      LABDECK_UPDATE_IMAGES: ${LABDECK_IMAGE_PREFIX:-ghcr.io/takalawang/labdeck}-
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/deploy:ro # compose.yaml、.env、secrets/discord_webhook
+      - updater_state:/state # 壞掉的 image ID
+    networks: [lab]
+
 networks:
   lab:
     # Docker 自動選網段；與校內既有網段衝突時指定：ipam: {config: [{subnet: 172.30.0.0/24}]}
@@ -131,3 +150,4 @@ volumes:
   prom_sd:
   prometheus_data:
   alertmanager_data:
+  updater_state:

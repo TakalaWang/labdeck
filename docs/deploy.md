@@ -64,7 +64,8 @@ curl -fsSL "https://github.com/<owner>/labdeck/archive/refs/tags/v$V.tar.gz" \
 diff -ru . /tmp/labdeck-new
 ```
 
-退回舊版：`LABDECK_VERSION` 改回舊版本後同樣 `docker compose pull && docker compose up -d`。新版可能已遷移 DB，升級前先手動備份一份（見「備份」）。
+退回舊版：`LABDECK_VERSION` 改回舊版本後同樣 `docker compose pull && docker compose up -d`。新版可能已遷移 DB，升級前先手動備份一份（見「備份」）；
+已遷移時舊版會拒絕啟動，要先還原遷移前的備份（見「自動更新（CD）」的「回復與 DB 遷移」）。要讓主機自己定時升級，見下一節。
 
 ### 從自行建置改為預先建好的 image
 
@@ -72,6 +73,90 @@ diff -ru . /tmp/labdeck-new
 （見 `.env.example`），再 `docker compose pull && docker compose up -d`。volume、`.env` 與 `secrets/` 都不變。
 runner 與 cli 不再掛載 repo：playbook 改為建置進 runner image（`/repo/ansible`），改 playbook 要重建 image。
 確認無誤後可刪掉舊的 `labdeck-web:local`、`labdeck-runner:local`、`labdeck-caddy:local`。
+
+## 自動更新（CD）
+
+監控主機在校內，GitHub 連不進來，也不從外面 SSH 進去部署，所以改由主機自己**定時去 GHCR 拉**：
+compose 的 `updater` 服務（profile `autoupdate`，預設不啟動）每 `LABDECK_UPDATE_INTERVAL` 秒（預設 600）跑一輪
+[`deploy/updater/updater.sh`](../deploy/updater/updater.sh)：
+
+1. 只看**正在跑**、且 image 是 `${LABDECK_IMAGE_PREFIX}-*` 的服務（web、runner、caddy）。停著的服務（例如刻意停掉的 runner）不拉、不啟動；
+   prometheus、alertmanager 等固定版本的第三方 image 不動（改 `compose.yaml` 時手動升級）。
+2. `docker compose pull` 這些服務；image 有變的，記下舊的 image ID，`docker compose up -d --no-deps <這些服務>`。
+3. 等健康檢查（`LABDECK_UPDATE_TIMEOUT` 秒，預設 180）：新容器在跑、沒有重啟過（有 healthcheck 的要 healthy），
+   web 有在跑時 `http://web:3000/api/session`（內部網路）回 200；隔 10 秒再確認一次。
+4. 沒通過就把 image 名稱指回舊的 image ID、再 `up -d` 一次（回復），並記下這個壞掉的 image，**之後不再重試，直到 CI 推出更新的版本**。
+5. 成功（含版本與 commit）、失敗、回復都送到 `secrets/discord_webhook`（和 Alertmanager 告警同一個頻道）；細節在 `docker compose logs updater`。
+   成功後刪掉換下來的舊 image。
+
+**為什麼預設不啟動**：updater 掛著 Docker socket（等同主機 root），而且會在沒有人看著的時候換掉正式環境的版本，
+所以要網管明確打開。打開之後它只做上面這幾件事，不會啟動停著的服務，也不改 `compose.yaml`、`deploy/`、`.env`。
+
+### 啟用
+
+需要含 `updater` 服務的 `compose.yaml` 與 `deploy/updater/`（依「升級」一節下載新版比對後套用），然後：
+
+```sh
+# LABDECK_VERSION 選頻道：main＝main 每次通過 CI 就更新；latest＝只跟正式版（v* tag）；固定版本（1.2.3）＝實際上不會更新
+printf 'COMPOSE_PROFILES=autoupdate\n' >> .env   # 之後的 docker compose up -d 也會帶著 updater
+docker compose up -d updater
+docker compose logs -f updater                  # 第一輪：「已是最新（caddy runner web）」或「更新：…」
+```
+
+| `.env` | 預設 | 說明 |
+|---|---|---|
+| `LABDECK_VERSION` | `latest` | 頻道：`main`（每個通過 CI 的 main commit）、`latest`（最新正式版）、`1.2`（1.2.x 的最新修補版）、`1.2.3`（固定） |
+| `LABDECK_UPDATE_INTERVAL` | `600` | 幾秒檢查一次 |
+| `LABDECK_UPDATE_TIMEOUT` | `180` | 更新後等健康檢查的秒數，超過就回復 |
+
+`LABDECK_VERSION` 每一輪都重讀 `.env`，改了下一輪就照新的頻道；`LABDECK_UPDATE_*` 改了要 `docker compose up -d updater` 才生效。`main` 頻道下每個 main commit 都會建出新 image（即使只改文件），
+web、runner、caddy 會重啟幾秒；runner 重啟時正在跑的 job 會中斷（和手動升級一樣）。正式環境建議用 `latest`。
+
+`deploy/updater/updater.sh` 是從部署目錄掛進去的，**不會隨 image 自動更新**（避免 updater 把自己更新壞）；
+updater 本身用固定版本的官方 `docker:*-cli` image。
+
+### 暫停與手動操作
+
+- 暫停：`docker compose stop updater`（`.env` 有 `COMPOSE_PROFILES=autoupdate` 時，下次 `docker compose up -d` 會再啟動）；
+  長期停用：從 `.env` 拿掉 `COMPOSE_PROFILES=autoupdate`，再 `docker compose rm -sf updater`。
+- 立刻更新一次（同樣有健康檢查與回復）：`docker compose run --rm updater once`。
+- 傳統的 `docker compose pull && docker compose up -d` 仍可用，但沒有健康檢查與回復，而且會啟動所有停著的服務。
+- 退回某個版本：`.env` 的 `LABDECK_VERSION` 改成 `sha-<commit 前 7 碼>` 或舊的版本號，`docker compose run --rm updater once`
+  （固定在這個 tag，之後不會再自動更新；改回 `main`／`latest` 才恢復）。
+- 被標成壞掉的版本想再試一次（例如失敗是外部原因）：`docker compose run --rm --entrypoint sh updater -c ': >/state/bad'`，
+  下一輪就會重試。
+
+### 回復與 DB 遷移
+
+web、runner 啟動時會就地遷移 DB（加欄位、放寬 CHECK），遷移前先備份到 `portal_data` 的 `/data/backup/pre-migrate-<時間>.db`。
+**舊版看到新的表結構會拒絕啟動**（它的 `schema.sql` 少了新欄位，重建會刪掉有資料的欄位），所以：
+
+- updater 從新容器的 log 偵測到遷移（`before migrating it`）而健康檢查又失敗時，**不自動回復**，只送 Discord 通知，由網管處理。
+- 成功的更新若有遷移，通知會註明；之後要退回舊版，也一樣要先還原遷移前的備份。
+
+手動退回遷移前的版本（遷移後寫入的資料會遺失）：
+
+```sh
+docker compose stop updater web runner
+docker compose run --rm --no-deps --entrypoint sh web -c 'ls -lt /data/backup/pre-migrate-*.db'   # 找遷移前的備份
+docker compose run --rm --no-deps --entrypoint sh web -c \
+  'cp /data/backup/pre-migrate-<時間>.db /data/portal.db && rm -f /data/portal.db-wal /data/portal.db-shm'
+# .env：LABDECK_VERSION=sha-<舊 commit>（或舊版本號）
+docker compose pull web runner && docker compose up -d web runner   # 原本停著的 runner 就只 up web
+```
+
+### 發布正式版（`latest` 頻道）
+
+在 main 上確認 CI 全綠後打 tag 並推上去，CI 會再跑一次全部檢查，通過才把 image 標上 `X.Y.Z`、`X.Y` 與 `latest`：
+
+```sh
+git switch main && git pull
+git tag -a v1.2.3 -m v1.2.3      # 有 - 的 tag（v1.3.0-rc.1）不會標 latest
+git push origin v1.2.3
+```
+
+要附 release notes 就在 GitHub 的 Releases 頁面以這個 tag 建立 Release（有改 `compose.yaml` 或 `deploy/` 時務必寫明，
+因為 updater 只換 image，這兩樣要網管手動套用）。
 
 ## 從 lab-dashboard 升級
 
@@ -276,6 +361,9 @@ FastAPI 後端、Vite SPA 與 `ansible/inventory/portal.py` 已換成 TypeScript
 - `./labdeck lint`：型別檢查、eslint、`next build`、cargo fmt／clippy、playbook syntax-check、Alertmanager 設定檢查。
 - 只改了監控主機上的 `deploy/prometheus/rules.yml` 時，在部署目錄也能直接測：
   `docker run --rm -v "$PWD/deploy/prometheus":/w -w /w --entrypoint promtool prom/prometheus:v3.15.0 test rules rules_test.yml`
+- 自動更新：`./labdeck test-updater`（= `scripts/test-updater.sh`，約 3 分鐘）。在暫存目錄起拋棄式 compose 專案、本機 registry、
+  假 web／runner image 與假 Discord webhook，用 `compose.yaml` 裡真正的 `updater` 定義逐輪檢查：v1→v2 更新、停著的 runner 不動、
+  壞掉的 v3 回復成 v2 且不再重試、遷移 DB 後失敗不自動回復、常駐模式。`KEEP=1` 跑完不拆。
 - 端對端：`./labdeck e2e`（= `e2e/run.sh`；需 Docker 可跑 privileged 容器，約 5–10 分鐘）。它把 repo 複製到 `e2e/.work/app`、
   產生測試用 `secrets/` 與 `.env`，以 `compose.yaml` + `e2e/compose.e2e.yaml` 起整套服務，另加假 OAuth provider（`e2e/mock_oauth.py`，
   兼當假 Discord（OAuth 與 webhook 收件端）與 SMTP 收件端，內容可由 `http://localhost:9999/_sink` 讀取）與一台假的 Ubuntu 20.04 主機 `gpu01`（`e2e/target/`，systemd + sshd），

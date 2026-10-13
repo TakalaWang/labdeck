@@ -50,7 +50,7 @@ flowchart LR
 | `packages/core/` | web 與 runner 共用：設定、SQLite schema、驗證、job、Prometheus 查詢 |
 | `ansible/` | playbooks（inventory 由 runner 從 DB 寫出） |
 | `crates/agent/` | labdeck-agent：部署到主機的收集程式（Rust 靜態執行檔，建置進 runner image） |
-| `deploy/` | Caddy、Prometheus、Alertmanager 設定 |
+| `deploy/` | Caddy、Prometheus、Alertmanager 設定；`deploy/updater/` 自動更新腳本 |
 | `scripts/` | 產生 `secrets/` 的腳本 |
 | `dev/`、`compose.dev.yaml` | 開發環境與 toolbox（`./labdeck`，見 docs/docker.md） |
 | `e2e/` | 端對端測試（假 OAuth、假 GPU 主機、Playwright） |
@@ -80,6 +80,7 @@ docker compose exec web labdeck add-admin <sso_id> <linux_username>
 
 之後在網頁 `/admin/hosts` 新增主機，於監控主機上 bootstrap 一次 bot 帳號，再按「安裝監控」與「收集資料」。
 升級：`docker compose pull && docker compose up -d`（見 [docs/deploy.md](docs/deploy.md#升級)）；從舊名稱 lab-dashboard 升級：見 [docs/deploy.md](docs/deploy.md#從-lab-dashboard-升級)（volume 名稱改變）。
+也可以啟用自動更新：監控主機定時從 GHCR 拉新版，健康檢查沒過就自動換回舊版（見 [docs/deploy.md](docs/deploy.md#自動更新cd)）。
 
 開發也只需要 Docker：`./labdeck dev` 起一套有 hot reload、假登入與假 GPU 主機的開發環境（http://localhost:8080 ），
 `./labdeck test`、`./labdeck lint`、`./labdeck e2e` 在容器內跑全部檢查，見 [docs/docker.md](docs/docker.md)。

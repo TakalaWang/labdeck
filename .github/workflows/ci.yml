@@ -1,6 +1,7 @@
 name: CI
 
 # 檢查都在容器內跑，與本機的 ./labdeck 相同（docs/docker.md）；main 與 v* tag 通過檢查後建置並推送 image 到 GHCR。
+# 正式版：git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z → image 標 X.Y.Z、X.Y、latest（docs/deploy.md「發布正式版」）。
 on:
   push:
     branches: [main]
@@ -58,11 +59,19 @@ jobs:
       - run: ./labdeck tool sh -c 'cd crates/agent && cargo clippy --all-targets --locked -- -D warnings'
       - run: ./labdeck tool sh -c 'cd crates/agent && cargo test --locked'
 
+  updater:
+    name: 自動更新（deploy/updater/：本機 registry 上的 v1→v2、回復、不重試）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./labdeck test-updater
+
   # ghcr.io/<owner>/labdeck-{web,runner,caddy}：sha-<commit>、main（main 分支）、<版本>、<主.次>、latest（正式版 tag）
   images:
     name: Image（${{ matrix.image }}）
     if: github.event_name == 'push'
-    needs: [node, ansible, agent]
+    needs: [node, ansible, agent, updater] # 全部檢查通過才推；監控主機的 updater 會自動部署 main／latest
     runs-on: ubuntu-latest
     permissions:
       contents: read
